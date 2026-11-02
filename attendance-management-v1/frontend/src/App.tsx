@@ -339,6 +339,15 @@ function SubjectsPage({semester,notify,onCreate,onNavigate,canEdit=true}:any){
   const [editingId,setEditingId]=useState<number|null>(null);
   const [planned,setPlanned]=useState<Record<number,string>>({});
 
+  // Subject CRUD must not reload or replace the independent weekly timetable mapping.
+  const loadSubjectsOnly=async()=>{
+    if(!semester)return;
+    const subjectData=await api<{subjects:SubjectStats[];unassignedEntries:number;entitlements?:{recoveryCalculator:boolean}}>(`/semesters/${semester.id}/subjects`);
+    setSubjects(subjectData.subjects);
+    setUnassigned(subjectData.unassignedEntries);
+    setEntitlements(subjectData.entitlements??{});
+  };
+
   const load=async()=>{
     if(!semester)return;
     setLoading(true);
@@ -363,14 +372,14 @@ function SubjectsPage({semester,notify,onCreate,onNavigate,canEdit=true}:any){
     try{
       if(editingId)await api(`/semesters/${semester.id}/subjects/${editingId}`,{method:'PATCH',body:JSON.stringify(payload)});
       else await api(`/semesters/${semester.id}/subjects`,{method:'POST',body:JSON.stringify(payload)});
-      resetForm();await load();notify(editingId?'Subject updated.':'Subject added to this semester.');
+      resetForm();await loadSubjectsOnly();notify(editingId?'Subject updated.':'Subject added to this semester.');
     }catch(e:any){notify(e.message,'error');}
     finally{setSaving(false);}
   };
   const editSubject=(subject:SubjectStats)=>{setEditingId(subject.id);setName(subject.name);setCode(subject.code??'');setTarget(subject.target_percentage==null?'':String(subject.target_percentage));window.scrollTo({top:0,behavior:'smooth'});};
   const deleteSubject=async(subject:SubjectStats)=>{
-    if(!semester||!canEdit||!confirm(`Delete ${subject.name}? Saved attendance will be retained but become unassigned.`))return;
-    try{await api(`/semesters/${semester.id}/subjects/${subject.id}`,{method:'DELETE'});await load();notify('Subject deleted. Existing attendance records were retained.');}
+    if(!semester||!canEdit||!confirm(`Delete ${subject.name}? If this subject is assigned in your weekly routine, Attendly will prevent deletion until those class slots are reassigned. Saved attendance records will be retained but become unassigned.`))return;
+    try{await api(`/semesters/${semester.id}/subjects/${subject.id}`,{method:'DELETE'});await loadSubjectsOnly();notify('Subject deleted. Your weekly routine was preserved.');}
     catch(e:any){notify(e.message,'error');}
   };
   const saveMapping=async()=>{

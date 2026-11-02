@@ -569,6 +569,20 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
       }
     }
     if (method === "DELETE") {
+      // Protect the weekly routine: a subject cannot be physically deleted while
+      // one or more timetable slots still refer to it. The student must reassign
+      // those slots first; this avoids ON DELETE SET NULL silently clearing them.
+      const assigned = await env.DB.prepare(`SELECT COUNT(*) AS count
+        FROM timetable_subjects WHERE semester_id=? AND subject_id=?`)
+        .bind(semesterId, subjectId).first<{ count: number }>();
+      const assignedCount = number(assigned?.count);
+      if (assignedCount > 0) {
+        return json({
+          error: `Cannot delete this subject because it is assigned to ${assignedCount} weekly class slot(s). Reassign those slots in your weekly routine first. Your routine has not been changed.`,
+          code: "SUBJECT_IN_USE_BY_TIMETABLE",
+          assignedSlots: assignedCount,
+        }, 409);
+      }
       await env.DB.prepare("DELETE FROM subjects WHERE id=? AND semester_id=?").bind(subjectId, semesterId).run();
       return json({ ok: true });
     }

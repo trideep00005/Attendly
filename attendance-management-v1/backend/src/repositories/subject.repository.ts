@@ -23,6 +23,12 @@ export function updateSubject(subjectId: number, semesterId: number, input: { na
     .run(input.name, input.code, input.targetPercentage, subjectId, semesterId);
 }
 
+export function countSubjectTimetableAssignments(subjectId: number, semesterId: number): number {
+  const row = db.prepare('SELECT COUNT(*) AS count FROM timetable_subjects WHERE semester_id=? AND subject_id=?')
+    .get(semesterId, subjectId) as { count: number } | undefined;
+  return Number(row?.count ?? 0);
+}
+
 export function deleteSubject(subjectId: number, semesterId: number): number {
   return db.prepare('DELETE FROM subjects WHERE id=? AND semester_id=?').run(subjectId, semesterId).changes;
 }

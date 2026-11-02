@@ -14,3 +14,5 @@ node_modules/
 
 # Logs
 *.log
+
+wrangler.toml

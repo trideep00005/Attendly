@@ -38,6 +38,15 @@ export function updateSemesterSubject(semesterId: number, subjectId: number, use
 
 export function deleteSemesterSubject(semesterId: number, subjectId: number, userId: number): void {
   getOwnedSemester(semesterId, userId);
+  const current = subjectRepository.findSubject(subjectId, semesterId);
+  if (!current) throw new AppError('Subject not found.', 404);
+  const assignedSlots = subjectRepository.countSubjectTimetableAssignments(subjectId, semesterId);
+  if (assignedSlots > 0) {
+    throw new AppError(
+      `Cannot delete "${current.name}" because it is assigned to ${assignedSlots} weekly class slot(s). Reassign those slots in your weekly routine first. Your routine has not been changed.`,
+      409,
+    );
+  }
   if (!subjectRepository.deleteSubject(subjectId, semesterId)) throw new AppError('Subject not found.', 404);
 }
 
