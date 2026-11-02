@@ -14,7 +14,7 @@ run_worker_first = ["/api/*"]
 [[d1_databases]]
 binding = "DB"
 database_name = "attendly-production"
-database_id = "3703990d-a1e5-4740-bf6b-de64c208cc32"
+database_id = "databaseID"
 migrations_dir = "migrations"
 
 [vars]
