@@ -1,0 +1,30 @@
+name = "attendly"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+# Cloudflare Workers Static Assets serves the existing React/Vite build.
+[assets]
+directory = "../attendance-management-v1/frontend/dist"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+# Create this D1 database using: npx wrangler d1 create attendly-production
+# Then replace the placeholder database_id below with the ID Wrangler returns.
+[[d1_databases]]
+binding = "DB"
+database_name = "attendly-production"
+database_id = "3703990d-a1e5-4740-bf6b-de64c208cc32"
+migrations_dir = "migrations"
+
+[vars]
+APP_NAME = "Attendly"
+APP_BASE_URL = "https://attendly.attendly-cloud-2026.workers.dev"
+APP_TIME_ZONE = "Asia/Kolkata"
+APP_ENV = "production"
+WHATSAPP_NUMBER = "918240303589"
+SUPPORT_EMAIL = "support.attendly.official@gmail.com"
+REGISTRATION_ENABLED = "true"
+
+[triggers]
+crons = ["0 * * * *"]

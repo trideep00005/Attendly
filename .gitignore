@@ -1,0 +1,41 @@
+
+# Dependencies
+**/node_modules/
+
+# Generated build output
+**/dist/
+
+# Cloudflare local state and secrets
+**/.wrangler/
+cloudflare/.dev.vars
+cloudflare/.dev.vars.*
+!cloudflare/.dev.vars.example
+
+# Environment files
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local databases and database sidecar files
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+
+# Local backend database backups
+**/backend/data/backups/
+
+# Generated database exports (may contain student data)
+cloudflare/migration-data/
+
+# Logs and build caches
+*.log
+npm-debug.log*
+**/*.tsbuildinfo
+
+# Operating system files
+.DS_Store
+Thumbs.db

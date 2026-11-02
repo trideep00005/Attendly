@@ -1,0 +1,21 @@
+**/node_modules/
+**/dist/
+backend/data/*.db
+backend/data/*.db-shm
+backend/data/*.db-wal
+backend/.env
+*.log
+.DS_Store
+
+
+# Local environment secrets
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log

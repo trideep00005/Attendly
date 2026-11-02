@@ -1,0 +1,23 @@
+{
+  "name": "attendly-cloudflare",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create attendly-production",
+    "db:migrate:local": "wrangler d1 migrations apply attendly-production --local",
+    "db:migrate:remote": "wrangler d1 migrations apply attendly-production --remote",
+    "db:export:local": "node ../tools/export-local-db-for-d1.mjs",
+    "typegen": "wrangler types"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "wrangler": "^4.44.0"
+  }
+}

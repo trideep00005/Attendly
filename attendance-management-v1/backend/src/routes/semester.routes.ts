@@ -1,0 +1,22 @@
+import { Router } from 'express';
+import { asyncHandler } from '../middlewares/async-handler.middleware.js';
+import { requireAuth } from '../middlewares/auth.middleware.js';
+import * as semesterController from '../controllers/semester.controller.js';
+import * as subjectController from '../controllers/subject.controller.js';
+
+const router = Router();
+router.use(requireAuth);
+router.get('/', asyncHandler(semesterController.list));
+router.post('/', asyncHandler(semesterController.create));
+router.patch('/:id', asyncHandler(semesterController.update));
+router.delete('/:id', asyncHandler(semesterController.remove));
+router.get('/:id/timetable', asyncHandler(semesterController.getTimetable));
+router.put('/:id/timetable', asyncHandler(semesterController.updateTimetable));
+router.get('/:id/subjects', asyncHandler(subjectController.list));
+router.post('/:id/subjects', asyncHandler(subjectController.create));
+router.patch('/:id/subjects/:subjectId', asyncHandler(subjectController.update));
+router.delete('/:id/subjects/:subjectId', asyncHandler(subjectController.remove));
+router.get('/:id/subject-timetable', asyncHandler(subjectController.getTimetable));
+router.put('/:id/subject-timetable', asyncHandler(subjectController.updateTimetable));
+router.post('/:id/subjects/apply-timetable', asyncHandler(subjectController.applyTimetable));
+export default router;
