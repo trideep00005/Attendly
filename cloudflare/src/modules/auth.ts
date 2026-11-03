@@ -5,6 +5,7 @@ import { constantTimeEqual, randomToken, SESSION_COOKIE, SESSION_SECONDS, sha256
 import { authRateAllowed, allowRate, requestIp } from "../lib/rate-limit";
 import { sendOtpEmail } from "./email";
 import { CURRENT_POLICY_VERSIONS } from "./legal";
+import { getPlatformControls } from "../lib/platform-controls";
 
 export interface AuthContext { user: UserRow; }
 
@@ -163,7 +164,11 @@ async function consumeOtp(env: Env, row: OtpRow): Promise<boolean> {
 
 async function startRegistrationOtp(request: Request, env: Env): Promise<Response> {
   if (!validateOrigin(request)) return json({ error: "Invalid request origin." }, 403);
-  if (env.REGISTRATION_ENABLED === "false") return json({ error: "Registration is temporarily closed." }, 403);
+  const platform = await getPlatformControls(env);
+  if (platform.maintenanceEnabled) return json({ error: platform.maintenanceReason || "Attendly is temporarily unavailable while we carry out maintenance.", code: "PLATFORM_MAINTENANCE", maintenanceMode: true }, 503);
+  if (platform.registrationPaused || env.REGISTRATION_ENABLED === "false") {
+    return json({ error: platform.registrationReason || "New registrations are temporarily paused by the Attendly administrator. Existing accounts can still sign in.", code: "REGISTRATION_PAUSED", registrationPaused: true }, 403);
+  }
   const body = await readJson<{ username?: unknown; password?: unknown; email?: unknown; acceptTerms?: unknown; acceptPrivacy?: unknown }>(request);
   if (body.acceptTerms !== true || body.acceptPrivacy !== true) return json({ error: "Please accept the Terms, Refund and Acceptable Use policies and acknowledge the Privacy Policy before registering." }, 400);
   if (!validUsername(body.username)) return json({ error: "Username must be 3–32 characters and use only letters, numbers, dot, underscore or hyphen." }, 400);
@@ -189,6 +194,11 @@ async function startRegistrationOtp(request: Request, env: Env): Promise<Respons
 
 async function verifyRegistrationOtp(request: Request, env: Env): Promise<Response> {
   if (!validateOrigin(request)) return json({ error: "Invalid request origin." }, 403);
+  const platform = await getPlatformControls(env);
+  if (platform.maintenanceEnabled) return json({ error: platform.maintenanceReason || "Attendly is temporarily unavailable while we carry out maintenance.", code: "PLATFORM_MAINTENANCE", maintenanceMode: true }, 503);
+  if (platform.registrationPaused || env.REGISTRATION_ENABLED === "false") {
+    return json({ error: platform.registrationReason || "New registrations are temporarily paused by the Attendly administrator. Existing accounts can still sign in.", code: "REGISTRATION_PAUSED", registrationPaused: true }, 403);
+  }
   const body = await readJson<{ email?: unknown; otp?: unknown }>(request);
   if (!validEmail(body.email) || typeof body.otp !== "string" || !/^\d{6}$/.test(body.otp)) return json({ error: "Enter your registered email and the six-digit verification code." }, 400);
   const email = normalizeEmail(body.email);
@@ -361,8 +371,21 @@ export async function handleAuth(request: Request, env: Env): Promise<Response |
   const method = request.method.toUpperCase();
 
   if (path === "/api/status" && method === "GET") {
-    const row = await env.DB.prepare("SELECT COUNT(*) AS total FROM app_user").first<{ total: number }>();
-    return json({ setupRequired: Number(row?.total || 0) === 0, registrationEnabled: env.REGISTRATION_ENABLED !== "false", emailVerificationRequired: true });
+    const [row, controls] = await Promise.all([
+      env.DB.prepare("SELECT COUNT(*) AS total FROM app_user").first<{ total: number }>(),
+      getPlatformControls(env),
+    ]);
+    const registrationPaused = controls.registrationPaused || env.REGISTRATION_ENABLED === "false";
+    return json({
+      setupRequired: Number(row?.total || 0) === 0,
+      registrationEnabled: !registrationPaused,
+      registrationPaused,
+      registrationReason: controls.registrationReason || (env.REGISTRATION_ENABLED === "false" ? "Registration is temporarily disabled by the deployment configuration." : ""),
+      maintenanceEnabled: controls.maintenanceEnabled,
+      maintenanceReason: controls.maintenanceReason,
+      maintenanceType: controls.maintenanceType,
+      emailVerificationRequired: true,
+    });
   }
 
   // The protected Super Admin bootstrap is the only account-creation route for initial deployment.
@@ -395,6 +418,16 @@ export async function handleAuth(request: Request, env: Env): Promise<Response |
       .first<UserRow & { password_hash: string }>();
     if (!user || user.account_status !== "ACTIVE" || typeof body.password !== "string" || !(await bcrypt.compare(body.password, user.password_hash))) {
       return json({ error: "Incorrect username or password." }, 401);
+    }
+    if (user.role === "STUDENT") {
+      const platform = await getPlatformControls(env);
+      if (platform.maintenanceEnabled) {
+        return json({
+          error: platform.maintenanceReason || "Attendly is temporarily unavailable. Only administrators can sign in during maintenance.",
+          code: "PLATFORM_MAINTENANCE",
+          maintenanceMode: true,
+        }, 503);
+      }
     }
     if (user.role !== "STUDENT") {
       if (!user.email) return json({ error: "This administrator account has no email address configured. Contact the Super Admin." }, 409);

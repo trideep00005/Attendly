@@ -4,7 +4,7 @@ import {
   Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3,
   CloudDownload, GraduationCap, LayoutDashboard, LogOut, Menu, Plus, Settings, ShieldCheck,
   Sparkles, Target, Trash2, TrendingUp, UserRound, X, Pencil, CreditCard, Shield, Tags,
-  FileText, type LucideIcon
+  FileText, UserPlus, type LucideIcon
 } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis, BarChart, Bar } from 'recharts';
 import { api, downloadFile } from './services/api';
@@ -14,6 +14,16 @@ import autoTable from 'jspdf-autotable';
 import { LegalPage, PolicyDocumentModal, type PolicyKey } from './pages/LegalPages';
 
 type Status = 'PRESENT'|'ABSENT'|'HOLIDAY'|'OTHER';
+type PlatformStatus = {
+  setupRequired:boolean;
+  registrationEnabled:boolean;
+  registrationPaused?:boolean;
+  registrationReason?:string;
+  maintenanceEnabled?:boolean;
+  maintenanceReason?:string;
+  maintenanceType?:string;
+  emailVerificationRequired?:boolean;
+};
 type Semester = { id:number; name:string; start_date:string; end_date:string; target_percentage:number; percentage:number; present:number; total:number; canEdit?:boolean; isFreeActive?:boolean; freeActiveSemesterId?:number|null; accessMode?:'FREE'|'PRO'; canCreateSemester?:boolean; recoveryClasses?:number|null; safeAbsences?:number|null; remainingScheduled?:number|null; bestCase?:number|null; entitlements?:{recoveryCalculator?:boolean;attendancePlanning?:boolean;subjectAnalytics?:boolean;customCategories?:boolean} };
 type Stats = { present:number; absent:number; missed:number; pendingPast:number; pendingClasses:number; holiday:number; other:number; excluded:number; total:number; totalClassesHeld:number; percentage:number; target:number; recoveryClasses:number|null; safeAbsences:number|null; remainingScheduled:number|null; bestCase:number|null; recordedSlots:number; recordedDays:number; collegeOpenDays:number; presentDays:number };
 type CalendarDay = { date:string; inSemester:boolean; classCount:number; entries:Record<number,Status>; categoryIds?:Record<number,number|null>; categoryNames?:Record<number,string|null>; categoryEffects?:Record<number,string|null>; subjectByClass?:Record<number,{id:number;name:string;code:string|null}>; recorded:number };
@@ -29,7 +39,7 @@ const todayISO = () => { const d=new Date(); return `${d.getFullYear()}-${String
 const initialMonth = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; };
 const initials = (s:string) => s.split(/\s+/).map(x=>x[0]).join('').slice(0,2).toUpperCase();
 
-const APP_PAGES = ['Dashboard','Calendar','Analytics','Semesters','Subjects','Attendance Categories','Reports & Backup','Settings','Subscription','Legal & Privacy','Administration'];
+const APP_PAGES = ['Dashboard','Calendar','Analytics','Semesters','Subjects','Attendance Categories','Reports & Backup','Settings','Subscription','Legal & Privacy','Administration','More'];
 const pageSlug = (name:string) => name.toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
 const pageHash = (name:string) => `#/${pageSlug(name)}`;
 const pageFromHash = () => {
@@ -41,7 +51,7 @@ const pageFromHash = () => {
 };
 
 function App(){
-  const [boot,setBoot]=useState(true); const [setup,setSetup]=useState(false); const [user,setUser]=useState(''); const [role,setRole]=useState('STUDENT');
+  const [boot,setBoot]=useState(true); const [setup,setSetup]=useState(false); const [user,setUser]=useState(''); const [role,setRole]=useState('STUDENT'); const [platformStatus,setPlatformStatus]=useState<PlatformStatus|null>(null);
   const [page,setPageState]=useState(()=>pageFromHash()); const [semesters,setSemesters]=useState<Semester[]>([]); const [semesterId,setSemesterId]=useState<number|null>(null);
   const [notice,setNotice]=useState<{kind:'error'|'success';text:string}|null>(null); const [sidebarOpen,setSidebarOpen]=useState(false);
   const [showCreate,setShowCreate]=useState(false);
@@ -66,7 +76,28 @@ function App(){
   },[]);
   const notify=(text:string,kind:'error'|'success'='success')=>{setNotice({kind,text});window.setTimeout(()=>setNotice(null),4200);};
   const loadSemesters=useCallback(async()=>{ const data=await api<Semester[]>('/semesters'); setSemesters(data); const preferred=data.find(s=>s.isFreeActive)?.id??data[0]?.id??null; setSemesterId(current=>current && data.some(s=>s.id===current)?current:preferred); },[]);
-  useEffect(()=>{ (async()=>{try{const s=await api<{setupRequired:boolean}>('/status');setSetup(s.setupRequired);if(!s.setupRequired){try{const m=await api<{user:{username:string;role?:string}}>('/auth/me');setUser(m.user.username);setRole(m.user.role||'STUDENT');await loadSemesters();}catch{}}}catch(e:any){notify(e.message,'error');}finally{setBoot(false);}})(); },[loadSemesters]);
+  useEffect(()=>{ (async()=>{try{const s=await api<PlatformStatus>('/status');setPlatformStatus(s);setSetup(s.setupRequired);if(!s.setupRequired){try{const m=await api<{user:{username:string;role?:string}}>('/auth/me');setUser(m.user.username);setRole(m.user.role||'STUDENT');await loadSemesters();}catch{}}}catch(e:any){notify(e.message,'error');}finally{setBoot(false);}})(); },[loadSemesters]);
+  // Poll the read-only public status endpoint so an administrator's global
+  // switch is reflected in already-open student tabs without a page refresh.
+  useEffect(()=>{
+    if(boot)return;
+    const refresh=()=>{api<PlatformStatus>('/status').then(setPlatformStatus).catch(()=>{/* keep the last known state during a brief network interruption */});};
+    const timer=window.setInterval(refresh,15000);
+    return ()=>window.clearInterval(timer);
+  },[boot]);
+  // If a student opened Attendly while maintenance was active, /auth/me was
+  // intentionally blocked. Restore the still-valid session after the admin
+  // reopens the platform, without asking the student to refresh or sign in again.
+  useEffect(()=>{
+    if(boot||user||platformStatus?.maintenanceEnabled||!platformStatus)return;
+    let active=true;
+    api<{user:{username:string;role?:string}}>('/auth/me').then(async result=>{
+      if(!active)return;
+      setUser(result.user.username);setRole(result.user.role||'STUDENT');
+      try{await loadSemesters();}catch{/* administrators may not have academic semesters */}
+    }).catch(()=>{/* no existing signed-in session */});
+    return ()=>{active=false;};
+  },[boot,user,platformStatus?.maintenanceEnabled,loadSemesters]);
   const activeSemester=semesters.find(s=>s.id===semesterId)??null;
   const chooseFreeActiveSemester=async(id:number)=>{try{await api('/semesters/free-active',{method:'PUT',body:JSON.stringify({semesterId:id})});await loadSemesters();setSemesterId(id);notify('Your Free working semester has been updated. Other semesters remain available in read-only mode.');}catch(e:any){notify(e.message,'error');}};
   const logout=async()=>{try{await api('/auth/logout',{method:'POST'});}finally{setUser('');setRole('STUDENT');setSemesters([]);setSemesterId(null);replacePage('Dashboard');}};
@@ -79,7 +110,8 @@ function App(){
   ];
   if(role!=='STUDENT') nav.push({name:'Administration',icon:Shield,section:'ADMIN'});
   if(boot) return <div className="boot"><div className="brand-mark"><Activity size={22}/></div><div className="spinner"/><span>Preparing your attendance workspace…</span></div>;
-  if(!user) return <AuthScreen setup={setup} onSuccess={async u=>{setUser(u);setSetup(false);try{const m=await api<{user:{role?:string}}>('/auth/me');setRole(m.user.role||'STUDENT');}catch{setRole('STUDENT');}await loadSemesters();}} notify={notify}/>;
+  if(platformStatus?.maintenanceEnabled && user && role==='STUDENT') return <MaintenanceScreen message={platformStatus.maintenanceReason||'Attendly is temporarily unavailable while we carry out maintenance.'} category={platformStatus.maintenanceType}/>;
+  if(!user) return <AuthScreen setup={setup} platformStatus={platformStatus} onSuccess={async u=>{setUser(u);setSetup(false);try{const m=await api<{user:{role?:string}}>('/auth/me');setRole(m.user.role||'STUDENT');}catch{setRole('STUDENT');}await loadSemesters();}} notify={notify}/>;
   const contentProps={semester:activeSemester,semesters,semesterId,setSemesterId,loadSemesters,notify,canEdit:activeSemester?.canEdit!==false,onChooseFreeActive:chooseFreeActiveSemester,onCreate:()=>setShowCreate(true)};
   return <div className="app-shell">
     {sidebarOpen&&<div className="mobile-scrim" onClick={()=>setSidebarOpen(false)}/>}
@@ -90,7 +122,7 @@ function App(){
       <div className="sidebar-bottom"><div className="privacy-note"><ShieldCheck size={16}/><span>Your data is private to your account</span></div><div className="user-card"><div className="avatar">{initials(user)}</div><div className="user-info"><strong>{user}</strong><span>Personal account</span></div><button className="signout-button" title="Sign out" aria-label="Sign out" onClick={logout}><LogOut size={17}/><span>Sign out</span></button></div></div>
     </aside>
     <main className="main-area">
-      <header className="topbar"><div className="top-left"><button className="icon-btn menu-toggle" onClick={()=>setSidebarOpen(true)}><Menu size={20}/></button><div className="breadcrumb">Workspace <ChevronRight size={14}/> <strong>{page}</strong></div></div><div className="top-right"><div className="semester-select-wrap"><GraduationCap size={16}/><select aria-label="Select semester" value={semesterId??''} onChange={e=>setSemesterId(e.target.value?Number(e.target.value):null)}><option value="">Select semester</option>{semesters.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select><ChevronDown size={14}/></div><div className="today-pill"><span className="live-dot"/>{new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}</div></div></header>
+      <header className="topbar"><div className="top-left"><div className="breadcrumb">Workspace <ChevronRight size={14}/> <strong>{page}</strong></div></div><div className="top-right"><div className="semester-select-wrap"><GraduationCap size={16}/><select aria-label="Select semester" value={semesterId??''} onChange={e=>setSemesterId(e.target.value?Number(e.target.value):null)}><option value="">Select semester</option>{semesters.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select><ChevronDown size={14}/></div><div className="today-pill"><span className="live-dot"/>{new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}</div></div></header>
       <div className="page-container">
         {activeSemester?.canEdit===false && ['Dashboard','Calendar','Analytics','Subjects','Attendance Categories','Settings','Reports & Backup'].includes(page) && <div className="semester-access-banner"><div><strong>Read-only semester</strong><span>Pro access has expired. You can view this semester, but editing is available only in your selected Free working semester.</span></div><button className="btn btn-secondary btn-small" onClick={()=>navigatePage('Semesters')}>Choose semester</button><button className="btn btn-primary btn-small" onClick={()=>navigatePage('Subscription')}>Upgrade to Pro</button></div>}
         {page==='Dashboard'&&<Dashboard {...contentProps} onNavigate={navigatePage}/>}
@@ -103,17 +135,59 @@ function App(){
         {page==='Reports & Backup'&&<ReportsPage {...contentProps} notify={notify}/>}
         {page==='Subscription'&&<SubscriptionPage notify={notify}/>}{page==='Legal & Privacy'&&<LegalPage notify={notify}/>}
         {page==='Administration'&&role!=='STUDENT'&&<AdminPage notify={notify} role={role}/>}
+        {page==='More'&&<MorePage nav={nav} user={user} onNavigate={navigatePage} onLogout={logout}/>}
       </div>
       <footer className="footer"><span>Attendly · Student Academic Workspace</span><span><ShieldCheck size={13}/> Account-protected records</span></footer>
     </main>
+    <nav className="mobile-bottom-nav" aria-label="Primary navigation">
+      {[
+        {name:'Dashboard',label:'Home',icon:LayoutDashboard},
+        {name:'Calendar',label:'Calendar',icon:CalendarDays},
+        {name:'Subjects',label:'Subjects',icon:BookOpen},
+        {name:'Analytics',label:'Insights',icon:TrendingUp}
+      ].map(item=>{const Icon=item.icon;return <button key={item.name} type="button" className={`mobile-nav-item ${page===item.name?'active':''}`} aria-current={page===item.name?'page':undefined} onClick={()=>navigatePage(item.name)}><Icon size={19}/><span>{item.label}</span></button>;})}
+      <button type="button" className={`mobile-nav-item ${!['Dashboard','Calendar','Subjects','Analytics'].includes(page)?'active':''}`} aria-label="More sections" aria-current={!['Dashboard','Calendar','Subjects','Analytics'].includes(page)?'page':undefined} onClick={()=>navigatePage('More')}><Menu size={19}/><span>More</span></button>
+    </nav>
     {showCreate&&<SemesterModal onClose={()=>setShowCreate(false)} onCreated={async(id)=>{setShowCreate(false);await loadSemesters();setSemesterId(id);navigatePage('Dashboard');notify('Your semester is ready. Start recording attendance!');}}/>}
     {notice&&<div className={`toast ${notice.kind}`}><span>{notice.kind==='success'?<CheckCircle2 size={18}/>:<AlertCircle size={18}/>}</span>{notice.text}<button className="icon-btn" onClick={()=>setNotice(null)}><X size={15}/></button></div>}
   </div>;
 }
 
-function AuthScreen({setup,onSuccess,notify}:{setup:boolean;onSuccess:(u:string)=>void;notify:(s:string,k?:'error'|'success')=>void}){
+function MorePage({nav,user,onNavigate,onLogout}:{nav:{name:string;icon:LucideIcon;section:string}[];user:string;onNavigate:(page:string)=>void;onLogout:()=>void}){
+  const sections=[
+    {key:'MANAGE',title:'Manage'},
+    {key:'ACCOUNT',title:'Account'},
+    {key:'ADMIN',title:'Administration'}
+  ].map(section=>({...section,items:nav.filter(item=>item.section===section.key&&item.name!=='Subjects')})).filter(section=>section.items.length>0);
+  return <>
+    <PageHeading eyebrow="YOUR WORKSPACE" title="More" description="Tools and account options in one place."/>
+    <div className="more-page-layout">
+      <div className="more-sections">
+        {sections.map(section=><section className="panel more-group" key={section.key}>
+          <div className="more-group-heading">{section.title}</div>
+          <div className="more-link-list">
+            {section.items.map(item=>{const Icon=item.icon;return <button type="button" className="more-link" key={item.name} onClick={()=>onNavigate(item.name)}>
+              <span className="more-link-icon"><Icon size={17}/></span>
+              <span className="more-link-name">{item.name}</span>
+              <ChevronRight size={16} className="more-link-arrow"/>
+            </button>;})}
+          </div>
+        </section>)}
+      </div>
+      <section className="panel more-account-card">
+        <div className="more-account-avatar">{initials(user)}</div>
+        <div className="more-account-copy"><strong>{user}</strong><span>Personal account</span></div>
+        <button type="button" className="btn btn-secondary more-signout" onClick={onLogout}><LogOut size={15}/> Sign out</button>
+      </section>
+    </div>
+  </>;
+}
+
+function AuthScreen({setup,platformStatus,onSuccess,notify}:{setup:boolean;platformStatus:PlatformStatus|null;onSuccess:(u:string)=>void;notify:(s:string,k?:'error'|'success')=>void}){
   type AuthMode='login'|'register'|'register-otp'|'forgot'|'reset-otp'|'admin-login-otp';
-  const [mode,setMode]=useState<AuthMode>(setup?'register':'login');
+  const registrationPaused=Boolean(platformStatus?.registrationPaused || platformStatus?.registrationEnabled===false);
+  const maintenanceEnabled=Boolean(platformStatus?.maintenanceEnabled);
+  const [mode,setMode]=useState<AuthMode>(setup&&!registrationPaused&&!maintenanceEnabled?'register':'login');
   const [username,setUsername]=useState('');
   const [email,setEmail]=useState('');
   const [password,setPassword]=useState('');
@@ -128,6 +202,7 @@ function AuthScreen({setup,onSuccess,notify}:{setup:boolean;onSuccess:(u:string)
   const [formError,setFormError]=useState('');
   const creating=mode==='register'||mode==='register-otp';
   const clearErrors=()=>setFormError('');
+  useEffect(()=>{if(maintenanceEnabled&&(mode==='register'||mode==='register-otp'||mode==='forgot'||mode==='reset-otp')){setMode('login');setOtp('');setPassword('');setConfirm('');}else if(registrationPaused&&(mode==='register'||mode==='register-otp')){setMode('login');setOtp('');setPassword('');setConfirm('');}},[maintenanceEnabled,registrationPaused,mode]);
   const requestRegistration=async(e:React.FormEvent<HTMLFormElement>)=>{
     e.preventDefault();
     if(password.length<12){setFormError('Use a password containing at least 12 characters.');return;}
@@ -184,19 +259,26 @@ function AuthScreen({setup,onSuccess,notify}:{setup:boolean;onSuccess:(u:string)
     catch(err:any){setFormError(err.message);notify(err.message,'error');}
     finally{setBusy(false);}
   };
-  const title=mode==='login'?'Welcome back':mode==='register'?'Create your account':mode==='register-otp'?'Verify your email':mode==='forgot'?'Forgot password':mode==='admin-login-otp'?'Verify administrator sign-in':'Set a new password';
-  const description=mode==='login'?'Sign in to view your semester progress and attendance.':mode==='register'?'Create a private academic workspace. We will email you a one-time verification code.':mode==='register-otp'?`Enter the six-digit code sent to ${email}. It expires in 10 minutes.`:mode==='forgot'?'Enter the email address linked to your Attendly account.':mode==='admin-login-otp'?`For account security, administrators must verify a sign-in code sent to ${email}.`:'Enter the six-digit code and choose a new password.';
+  const title=mode==='login'?(maintenanceEnabled?'Administrator access':'Welcome back'):mode==='register'?'Create your account':mode==='register-otp'?'Verify your email':mode==='forgot'?'Forgot password':mode==='admin-login-otp'?'Verify administrator sign-in':'Set a new password';
+  const description=mode==='login'?(maintenanceEnabled?'Attendly is temporarily closed. Only administrators can sign in while maintenance is active.':'Sign in to view your semester progress and attendance.'):mode==='register'?'Create a private academic workspace. We will email you a one-time verification code.':mode==='register-otp'?`Enter the six-digit code sent to ${email}. It expires in 10 minutes.`:mode==='forgot'?'Enter the email address linked to your Attendly account.':mode==='admin-login-otp'?`For account security, administrators must verify a sign-in code sent to ${email}.`:'Enter the six-digit code and choose a new password.';
   return <div className="auth-page"><div className="auth-decoration deco-one"/><div className="auth-decoration deco-two"/><div className="auth-card"><div className="auth-brand"><div className="brand-mark"><Activity size={23}/></div><span>ATTENDLY</span></div><div className="auth-art"><div className="auth-art-icon"><CalendarDays size={29}/></div><div className="art-line line-a"/><div className="art-line line-b"/><div className="art-bubble">70%</div><div className="art-check"><Check size={15}/></div></div><div className="auth-heading"><div className="eyebrow">YOUR PERSONAL ACADEMIC ASSISTANT</div><h1>{title}</h1><p>{description}</p></div>
+    {maintenanceEnabled&&<div className="platform-public-notice maintenance"><div className="platform-public-notice-title"><ShieldCheck size={17}/> Attendly is temporarily closed <span className="platform-reason-tag">{platformStatus?.maintenanceType==='NEW_UPDATE'?'New update':platformStatus?.maintenanceType==='PROBLEM_FIX'?'Problem fix':platformStatus?.maintenanceType==='OTHER'?'Other':'Maintenance'}</span></div><p>{platformStatus?.maintenanceReason||'We are carrying out a temporary service update. Please check back soon.'}</p></div>}
+    {!maintenanceEnabled&&registrationPaused&&<div className="platform-public-notice registration"><div className="platform-public-notice-title"><UserPlus size={17}/> New registrations are paused</div><p>{platformStatus?.registrationReason||'New account creation is temporarily paused by the Attendly administrator.'}</p><small>Already have an account? You can still sign in normally.</small></div>}
     {formError&&<div className="auth-error"><AlertCircle size={15}/>{formError}</div>}
-    {mode==='login'&&<form onSubmit={login} className="auth-form"><label>Username<input value={username} onChange={e=>setUsername(e.target.value)} placeholder="Enter username" required autoComplete="username"/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Enter your password" required autoComplete="current-password"/></label><div className="auth-forgot-row"><button type="button" className="text-button" onClick={()=>{setMode('forgot');setPassword('');clearErrors();}}>Forgot password?</button></div><button className="btn btn-primary full" disabled={busy}>{busy?'Signing in…':'Sign in'} <ArrowRight size={17}/></button></form>}
+    {mode==='login'&&<form onSubmit={login} className="auth-form"><label>Username<input value={username} onChange={e=>setUsername(e.target.value)} placeholder="Enter username" required autoComplete="username"/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Enter your password" required autoComplete="current-password"/></label>{!maintenanceEnabled&&<div className="auth-forgot-row"><button type="button" className="text-button" onClick={()=>{setMode('forgot');setPassword('');clearErrors();}}>Forgot password?</button></div>}<button className="btn btn-primary full" disabled={busy}>{busy?'Signing in…':'Sign in'} <ArrowRight size={17}/></button></form>}
     {mode==='register'&&<form onSubmit={requestRegistration} className="auth-form"><label>Username<input value={username} onChange={e=>setUsername(e.target.value)} placeholder="Choose a username" minLength={3} maxLength={32} required autoComplete="username"/></label><label>Email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" required autoComplete="email"/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="At least 12 characters" minLength={12} maxLength={128} required autoComplete="new-password"/></label><label>Confirm password<input type="password" value={confirm} onChange={e=>setConfirm(e.target.value)} placeholder="Re-enter your password" minLength={12} required autoComplete="new-password"/></label><div className="auth-policy-consents"><div className="auth-policy-check"><input type="checkbox" checked={acceptTerms} onChange={e=>setAcceptTerms(e.target.checked)}/><span>I agree to the <button type="button" className="inline-policy-link" onClick={()=>setPolicyModal('TERMS')}>Terms & Conditions</button>, including the <button type="button" className="inline-policy-link" onClick={()=>setPolicyModal('REFUND')}>Refund Policy</button> and <button type="button" className="inline-policy-link" onClick={()=>setPolicyModal('ACCEPTABLE_USE')}>Acceptable Use Policy</button>.</span></div><div className="auth-policy-check"><input type="checkbox" checked={acceptPrivacy} onChange={e=>setAcceptPrivacy(e.target.checked)}/><span>I have read and acknowledge the <button type="button" className="inline-policy-link" onClick={()=>setPolicyModal('PRIVACY')}>Privacy Policy</button>.</span></div><p>Read each policy before continuing. Your acknowledgement is recorded with its version when your email is verified.</p></div><button className="btn btn-primary full" disabled={busy}>{busy?'Sending verification code…':'Continue with email verification'} <ArrowRight size={17}/></button></form>}
     {mode==='register-otp'&&<form onSubmit={verifyRegistration} className="auth-form"><label>Email address<input type="email" value={email} disabled readOnly/></label><label>Six-digit verification code<input inputMode="numeric" autoComplete="one-time-code" value={otp} onChange={e=>setOtp(e.target.value.replace(/\D/g,'').slice(0,6))} placeholder="000000" minLength={6} maxLength={6} required/></label><div className="auth-otp-note">Your code expires in 10 minutes. You have up to five attempts.</div><button className="btn btn-primary full" disabled={busy||otp.length!==6}>{busy?'Verifying…':'Verify email & create account'} <ArrowRight size={17}/></button><button type="button" className="text-button auth-back" disabled={busy} onClick={()=>void resendRegistration()}>Resend verification code</button><button type="button" className="text-button auth-back" onClick={()=>{setMode('register');setOtp('');clearErrors();}}>Back to registration details</button></form>}
     {mode==='forgot'&&<form onSubmit={startReset} className="auth-form"><label>Registered email address<input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" required autoComplete="email"/></label><button className="btn btn-primary full" disabled={busy}>{busy?'Sending code…':'Send password reset code'} <ArrowRight size={17}/></button><button type="button" className="text-button auth-back" onClick={()=>{setMode('login');clearErrors();}}>Back to sign in</button></form>}
     {mode==='reset-otp'&&<form onSubmit={completeReset} className="auth-form"><label>Registered email<input type="email" value={email} disabled readOnly/></label><label>Six-digit verification code<input inputMode="numeric" autoComplete="one-time-code" value={otp} onChange={e=>setOtp(e.target.value.replace(/\D/g,'').slice(0,6))} placeholder="000000" minLength={6} maxLength={6} required/></label><label>New password<input type="password" value={newPassword} onChange={e=>setNewPassword(e.target.value)} placeholder="At least 12 characters" minLength={12} maxLength={128} required autoComplete="new-password"/></label><label>Confirm new password<input type="password" value={newConfirm} onChange={e=>setNewConfirm(e.target.value)} placeholder="Re-enter new password" minLength={12} required autoComplete="new-password"/></label><button className="btn btn-primary full" disabled={busy||otp.length!==6}>{busy?'Updating password…':'Verify & update password'} <ArrowRight size={17}/></button><button type="button" className="text-button auth-back" onClick={()=>{setMode('forgot');setOtp('');clearErrors();}}>Request another code</button></form>}
     {mode==='admin-login-otp'&&<form onSubmit={verifyAdminLogin} className="auth-form"><label>Administrator email<input type="email" value={email} disabled readOnly/></label><label>Six-digit sign-in code<input inputMode="numeric" autoComplete="one-time-code" value={otp} onChange={e=>setOtp(e.target.value.replace(/\D/g,'').slice(0,6))} placeholder="000000" minLength={6} maxLength={6} required/></label><div className="auth-otp-note">The code expires in 10 minutes and can be used once. Five incorrect attempts will invalidate it.</div><button className="btn btn-primary full" disabled={busy||otp.length!==6}>{busy?'Verifying…':'Verify administrator sign-in'} <ArrowRight size={17}/></button><button type="button" className="text-button auth-back" disabled={busy} onClick={()=>void resendAdminLogin()}>Resend code</button><button type="button" className="text-button auth-back" disabled={busy} onClick={()=>{setMode('login');setOtp('');setPassword('');clearErrors();}}>Back to sign in</button></form>}
-    {(mode==='login'||mode==='register')&&!setup&&<div className="auth-switch">{mode==='register'?'Already have an account?':'New to Attendly?'} <button type="button" className="text-button" onClick={()=>{setMode(mode==='register'?'login':'register');setPassword('');setConfirm('');setOtp('');clearErrors();}}>{mode==='register'?'Sign in':'Create an account'}</button></div>}
+    {(mode==='login'||mode==='register')&&!setup&&!maintenanceEnabled&&!registrationPaused&&<div className="auth-switch">{mode==='register'?'Already have an account?':'New to Attendly?'} <button type="button" className="text-button" onClick={()=>{setMode(mode==='register'?'login':'register');setPassword('');setConfirm('');setOtp('');clearErrors();}}>{mode==='register'?'Sign in':'Create an account'}</button></div>}
     <div className="auth-safe"><ShieldCheck size={15}/> Separate private accounts · Email verification · Account protection</div></div><div className="auth-foot">ATTENDLY <span>·</span> KEEP YOUR SEMESTER ON TRACK</div><PolicyDocumentModal policyKey={policyModal} onClose={()=>setPolicyModal(null)}/></div>;
 }
+function MaintenanceScreen({message,category}:{message:string;category?:string}){
+  const categoryLabel=category==='NEW_UPDATE'?'New update':category==='PROBLEM_FIX'?'Problem fix':category==='OTHER'?'Other':'Scheduled maintenance';
+  return <div className="platform-maintenance-page"><div className="platform-maintenance-card"><div className="brand-mark"><Activity size={23}/></div><div className="eyebrow">ATTENDLY SERVICE NOTICE · {categoryLabel.toUpperCase()}</div><h1>We’ll be back soon.</h1><p>{message}</p><div className="platform-maintenance-meta"><ShieldCheck size={16}/> Your account data is safe. Student access will return when maintenance is complete.</div><small>This page will update automatically.</small></div></div>;
+}
+
 function PageHeading({eyebrow,title,description,action}:{eyebrow:string;title:string;description:string;action?:React.ReactNode}){return <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{action&&<div className="heading-action">{action}</div>}</div>;}
 function EmptySemester({onCreate}:{onCreate:()=>void}){return <div className="empty-state"><div className="empty-illustration"><GraduationCap size={34}/><span><Plus size={18}/></span></div><h2>Your first semester starts here</h2><p>Create a semester by choosing its start date, end date and attendance target. Your calendar and analytics will be generated automatically.</p><button className="btn btn-primary" onClick={onCreate}><Plus size={17}/> Create your first semester</button></div>;}
 function MetricCard({label,value,sub,icon:Icon,tone='blue',trend}:{label:string;value:string|number;sub:string;icon:LucideIcon;tone?:string;trend?:string}){return <div className="metric-card"><div className="metric-top"><span>{label}</span><div className={`metric-icon ${tone}`}><Icon size={19}/></div></div><div className="metric-value">{value}</div><div className="metric-sub">{sub}{trend&&<span className="metric-trend">{trend}</span>}</div></div>;}
@@ -210,7 +292,7 @@ function Dashboard({semester,semesters,onCreate,onNavigate}:any){
   return <><PageHeading eyebrow="OVERVIEW · YOUR PROGRESS" title="Your dashboard" description={`Here is how ${semester.name} is going. Stay consistent and keep your target in sight.`} action={<button className="btn btn-primary" onClick={()=>onNavigate('Calendar')}><CalendarDays size={16}/> Mark attendance</button>}/>
     {loading&&!s?<div className="loading-line">Loading your semester insights…</div>:s&&<>
       <div className="welcome-strip"><div className="welcome-icon"><Sparkles size={18}/></div><div><strong>{s.pendingPast>0?'Complete your attendance log':good?'You are on track. Keep it up!':s.total===0?'A fresh semester is a fresh start.':'A little consistency goes a long way.'}</strong><span>{s.pendingPast>0?`${s.pendingPast} past class slots are still unmarked. Complete them for accurate analytics.`:good?(data?.entitlements?.recoveryCalculator&&s.safeAbsences!==null&&s.safeAbsences!==undefined?(s.safeAbsences===0?`You are at the ${s.target}% target boundary. Attend upcoming classes to build a buffer.`:`You can miss up to ${s.safeAbsences} more countable ${s.safeAbsences===1?'class':'classes'} and stay at or above your ${s.target}%.`):`You are ${(s.percentage-s.target).toFixed(1)} percentage points above your ${s.target}% target.`):s.percentage<s.target&&s.total?(data?.entitlements?.recoveryCalculator?`Attend the next ${s.recoveryClasses??'required'} consecutive classes to recover to your target.`:'Recovery calculations are available with Attendly Pro.'): 'Mark your first classes to start seeing your progress.'}</span></div><div className="welcome-target"><span>YOUR TARGET</span><strong>{s.target}%</strong></div></div>
-      <div className="metric-grid dashboard-metric-grid"><MetricCard label="Current attendance" value={`${s.percentage.toFixed(1)}%`} sub={`Target: ${s.target}%`} icon={Activity} tone={good?'green':'orange'}/><MetricCard label="Classes attended" value={s.present} sub="Only Present-mapped classes" icon={CheckCircle2} tone="green"/><MetricCard label="Classes missed" value={s.absent} sub="Absent-mapped classes" icon={AlertCircle} tone="red"/><MetricCard label="Other mapped to Holiday" value={s.excluded} sub="Treated like a holiday; not held or counted" icon={Tags} tone="purple"/><MetricCard label="Pending classes" value={s.pendingClasses} sub="Held classes not marked yet" icon={Clock3} tone="orange"/><MetricCard label="College open days" value={s.collegeOpenDays} sub="Scheduled days, excluding full holidays" icon={CalendarDays} tone="blue"/><MetricCard label="Days present" value={s.presentDays} sub="At least one Present class recorded" icon={CheckCircle2} tone="green"/></div>
+      <div className="metric-grid dashboard-metric-grid"><MetricCard label="Current attendance" value={`${s.percentage.toFixed(1)}%`} sub={`Target: ${s.target}%`} icon={Activity} tone={good?'green':'orange'}/><MetricCard label="Classes attended" value={s.present} sub="Only Present-mapped classes" icon={CheckCircle2} tone="green"/><MetricCard label="Classes missed" value={s.absent} sub="Absent-mapped classes" icon={AlertCircle} tone="red"/><MetricCard label="Other mapped to Holiday" value={s.excluded} sub="Treated like a holiday; not held or counted" icon={Tags} tone="purple"/><MetricCard label="College open days" value={s.collegeOpenDays} sub="Scheduled days, excluding full holidays" icon={CalendarDays} tone="blue"/><MetricCard label="Days present" value={s.presentDays} sub="At least one Present class recorded" icon={CheckCircle2} tone="green"/></div>
       {data?.entitlements?.recoveryCalculator&&s.total>0&&s.percentage<s.target&&<section className={`panel recovery-callout ${(s.bestCase!==null&&s.bestCase<s.target)?'unreachable':''}`}><div className="recovery-icon"><Target size={21}/></div><div className="recovery-copy"><div className="panel-kicker">ATTENDANCE RECOVERY PLAN</div><h3>{s.recoveryClasses===null?'A 100% target cannot be recovered after a missed class':(s.bestCase!==null&&s.bestCase<s.target)?'Your target may not be reachable this semester':`Attend the next ${s.recoveryClasses} ${s.recoveryClasses===1?'class':'classes'} to reach ${s.target}%`}</h3><p>{s.recoveryClasses===null?'A 100% attendance target cannot be restored once a countable absence has occurred.':(s.bestCase!==null&&s.bestCase<s.target)?`Even if you attend every remaining scheduled class, your best possible semester attendance is ${s.bestCase.toFixed(1)}%. Only ${s.remainingScheduled??0} scheduled classes remain.`:`You need ${s.recoveryClasses??'the required number of'} consecutive Present classes, with no additional absences, to reach your ${s.target}% target. Holidays are excluded.`}</p></div><div className="recovery-count"><strong>{s.recoveryClasses??'—'}</strong><span>classes needed</span></div></section>}
       <div className="dashboard-grid"><section className="panel attendance-panel"><div className="panel-header"><div><div className="panel-kicker">ATTENDANCE HEALTH</div><h3>Semester performance</h3></div><span className={`status-chip ${good?'positive':'warning'}`}><span/>{good?'Above target':'Below target'}</span></div><div className="performance-content"><ProgressRing value={s.percentage} target={s.target}/><div className="performance-details"><div className="performance-row"><span><i className="dot green-dot"/>Attended</span><strong>{s.present}</strong></div><div className="performance-row"><span><i className="dot red-dot"/>Absent</span><strong>{s.absent}</strong></div><div className="performance-row"><span><i className="dot" style={{background:'#8b5cf6'}}/>Other mapped to Holiday</span><strong>{s.excluded}</strong></div><div className="performance-row"><span><i className="dot" style={{background:'#d97706'}}/>Pending</span><strong>{s.pendingClasses}</strong></div><div className="performance-row"><span><i className="dot" style={{background:'#a78bfa'}}/>All holiday slots</span><strong>{s.holiday}</strong></div><div className="target-line"><div><span>Progress to target</span><strong>{Math.min(100,s.percentage/Math.max(1,s.target)*100).toFixed(0)}%</strong></div><div className="progress-track"><span style={{width:`${Math.min(100,s.percentage/Math.max(1,s.target)*100)}%`}}/></div></div></div></div></section>
         <section className="panel insight-panel"><div className="panel-header"><div><div className="panel-kicker">SMART INSIGHTS</div><h3>Your attendance outlook</h3></div><div className="insight-spark"><Sparkles size={16}/></div></div>{data?.entitlements?.recoveryCalculator?<><div className={`insight-main ${good?'insight-main-positive':'insight-main-recovery'}`}><div className="insight-number">{s.total===0?'—':good?(s.safeAbsences??0):(s.recoveryClasses??'—')}<small>{good?'classes you can miss':'classes to attend'}</small></div><div><strong>{good?'Attendance buffer':'Recovery classes needed'}</strong><p>{s.total===0?'Record your first classes to calculate your attendance outlook.':good?(s.safeAbsences===0?'You are at the target boundary. Attend upcoming classes to build a buffer.':`You can miss up to ${s.safeAbsences} more countable ${s.safeAbsences===1?'class':'classes'} and remain at or above ${s.target}%.`):s.recoveryClasses===null?'A 100% target cannot be recovered after a countable absence.':`Attend the next ${s.recoveryClasses??'required'} consecutive classes without another absence to reach ${s.target}%.`}{s.pendingPast>0?` ${s.pendingPast} past class slots are still unmarked, so this estimate may change.`:''}</p></div></div>{data?.entitlements?.attendancePlanning&&<><div className="insight-divider"/><div className="insight-stat"><span>Classes left on timetable</span><strong>{s.remainingScheduled??'—'}</strong></div><div className="insight-stat"><span>Best-case semester finish</span><strong className={(s.bestCase??0)>=s.target?'text-green':'text-orange'}>{s.bestCase===null?'—':`${s.bestCase.toFixed(1)}%`}</strong></div></>}</>:<div className="upgrade-inline"><strong>Unlock attendance planning tools</strong><p>Pro includes safe absence and recovery calculations.</p><button className="btn btn-secondary btn-small" onClick={()=>onNavigate('Subscription')}>Explore Pro plans <ArrowRight size={14}/></button></div>}</section></div>

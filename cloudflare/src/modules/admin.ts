@@ -3,6 +3,7 @@ import type { Env, UserRole } from "../types";
 import { json, readJson } from "../lib/http";
 import type { AuthContext } from "./auth";
 import { refreshSubscriptionStates } from "./subscriptions";
+import { getPlatformControls } from "../lib/platform-controls";
 
 const rows = <T>(result: D1Result<T>): T[] => result.results || [];
 const PERMISSIONS = ["dashboard.read", "users.read", "users.status", "payments.read", "payments.verify", "subscriptions.read", "subscriptions.grant", "plans.read", "plans.manage", "admins.manage", "audit.read"] as const;
@@ -45,6 +46,72 @@ export async function handleAdmin(request: Request, env: Env, auth: AuthContext)
   const path = url.pathname;
   const method = request.method.toUpperCase();
   if (!path.startsWith("/api/admin/")) return null;
+
+  // Global platform switches are deliberately restricted to the Super Admin.
+  // They affect every student account and therefore must not be delegated by
+  // ordinary Admin or Support Admin permission overrides.
+  if (path === "/api/admin/platform-controls" && method === "GET") {
+    if (auth.user.role !== "SUPER_ADMIN") return json({ error: "Only the Super Admin can view global platform controls." }, 403);
+    const controls = await getPlatformControls(env);
+    return json({ controls: {
+      ...controls,
+      registrationPaused: controls.registrationPaused || env.REGISTRATION_ENABLED === "false",
+      registrationReason: controls.registrationReason || (env.REGISTRATION_ENABLED === "false" ? "Registration is disabled in the deployment configuration." : ""),
+    } });
+  }
+
+  if (path === "/api/admin/platform-controls" && method === "PUT") {
+    if (auth.user.role !== "SUPER_ADMIN") return json({ error: "Only the Super Admin can change global platform controls." }, 403);
+    const body = await readJson<{
+      maintenanceEnabled?: unknown;
+      maintenanceType?: unknown;
+      maintenanceReason?: unknown;
+      registrationPaused?: unknown;
+      registrationReason?: unknown;
+    }>(request);
+    if (typeof body.maintenanceEnabled !== "boolean" || typeof body.registrationPaused !== "boolean") {
+      return json({ error: "Choose valid maintenance and registration states." }, 400);
+    }
+    const maintenanceTypes = ["MAINTENANCE", "NEW_UPDATE", "PROBLEM_FIX", "OTHER"];
+    const maintenanceType = typeof body.maintenanceType === "string" && maintenanceTypes.includes(body.maintenanceType)
+      ? body.maintenanceType : "OTHER";
+    const maintenanceReason = typeof body.maintenanceReason === "string" ? body.maintenanceReason.trim() : "";
+    const registrationReason = typeof body.registrationReason === "string" ? body.registrationReason.trim() : "";
+    if (body.maintenanceEnabled && (maintenanceReason.length < 4 || maintenanceReason.length > 500)) {
+      return json({ error: "Enter a maintenance explanation between 4 and 500 characters." }, 400);
+    }
+    if (body.registrationPaused && (registrationReason.length < 4 || registrationReason.length > 500)) {
+      return json({ error: "Enter a registration-pause message between 4 and 500 characters." }, 400);
+    }
+    if (env.REGISTRATION_ENABLED === "false" && !body.registrationPaused) {
+      return json({ error: "Registration is disabled by the Cloudflare deployment variable REGISTRATION_ENABLED=false. Update that variable before reopening registration." }, 409);
+    }
+
+    const previous = await getPlatformControls(env);
+    const settings: Array<[string, string]> = [
+      ["platform_maintenance_enabled", String(body.maintenanceEnabled)],
+      ["platform_maintenance_type", maintenanceType],
+      ["platform_maintenance_reason", maintenanceReason],
+      ["platform_registration_paused", String(body.registrationPaused)],
+      ["platform_registration_reason", registrationReason],
+    ];
+    await env.DB.batch([
+      ...settings.map(([key, value]) => env.DB.prepare(`INSERT INTO app_settings(setting_key,setting_value,updated_by)
+        VALUES(?,?,?) ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value,
+        updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP`).bind(key, value, auth.user.id)),
+      env.DB.prepare(`INSERT INTO audit_logs(actor_user_id,action,target_type,target_id,reason,metadata_json)
+        VALUES(?, 'PLATFORM_CONTROLS_UPDATED', 'PLATFORM', 'GLOBAL', ?, ?)`)
+        .bind(auth.user.id,
+          [body.maintenanceEnabled ? `Maintenance enabled: ${maintenanceReason}` : "Maintenance disabled",
+           body.registrationPaused ? `Registration paused: ${registrationReason}` : "Registration reopened"].join("; "),
+          JSON.stringify({
+            previous: { maintenanceEnabled: previous.maintenanceEnabled, registrationPaused: previous.registrationPaused },
+            current: { maintenanceEnabled: body.maintenanceEnabled, maintenanceType, registrationPaused: body.registrationPaused },
+          })),
+    ]);
+    const controls = await getPlatformControls(env);
+    return json({ ok: true, message: "Global platform controls updated.", controls });
+  }
 
   await refreshSubscriptionStates(env);
 

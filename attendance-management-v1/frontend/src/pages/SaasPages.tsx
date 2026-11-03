@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { Activity, AlertCircle, ArrowRight, BadgeCheck, CalendarClock, CheckCircle2, CreditCard, ExternalLink, RefreshCw, ShieldCheck, Users, XCircle } from 'lucide-react';
+import { Activity, AlertCircle, ArrowRight, BadgeCheck, CalendarClock, CheckCircle2, CreditCard, ExternalLink, RefreshCw, ShieldCheck, Users, XCircle, Power, UserPlus, Wrench, Save } from 'lucide-react';
 import { api } from '../services/api';
 
 type Notify = (message: string, kind?: 'error'|'success') => void;
@@ -99,6 +99,13 @@ type AdminUser = {id:number;username:string;email:string;role:string;account_sta
 type AdminPlan = {id:number;code:string;name:string;price_inr:number;duration_days:number|null;tier:string;enabled:number;features:Record<string,unknown>};
 type AdminAccount = {id:number;username:string;email:string;role:string;account_status:string;created_at:string;overrides:Record<string,boolean>};
 type AuditLog = {id:number;action:string;target_type:string|null;target_id:string|null;reason:string|null;metadata_json:string;created_at:string;actor:string|null};
+type PlatformControls = {
+  maintenanceEnabled:boolean;
+  maintenanceReason:string;
+  maintenanceType:string;
+  registrationPaused:boolean;
+  registrationReason:string;
+};
 
 export function AdminPage({notify,role}:{notify:Notify;role:string}) {
   const [overview,setOverview]=useState<AdminOverview|null>(null);
@@ -115,13 +122,22 @@ export function AdminPage({notify,role}:{notify:Notify;role:string}) {
   const [grantReason,setGrantReason]=useState('');
   const [grantBusy,setGrantBusy]=useState(false);
   const [adminForm,setAdminForm]=useState({username:'',email:'',password:'',role:'SUPPORT_ADMIN'});
+  const [platformControls,setPlatformControls]=useState<PlatformControls>({maintenanceEnabled:false,maintenanceReason:'',maintenanceType:'MAINTENANCE',registrationPaused:false,registrationReason:''});
+  const [platformSaving,setPlatformSaving]=useState(false);
   const [loading,setLoading]=useState(true);
   const isSuper=role==='SUPER_ADMIN';
   const canReview=role==='SUPER_ADMIN'||role==='ADMIN';
   const load=useCallback(async()=>{setLoading(true);try{
     const [o,u]=await Promise.all([api<AdminOverview>('/admin/overview'),api<{users:AdminUser[]}>('/admin/users')]);setOverview(o);setUsers(u.users);
     if(canReview){const p=await api<{claims:Claim[]}>('/admin/payment-claims');setClaims(p.claims);}
-    if(isSuper){const [p,a]=await Promise.all([api<{plans:AdminPlan[]}>('/admin/plans'),api<{admins:AdminAccount[]}>('/admin/admin-users')]);setPlans(p.plans);setAdminAccounts(a.admins);}
+    if(isSuper){
+      const [p,a,c]=await Promise.all([
+        api<{plans:AdminPlan[]}>('/admin/plans'),
+        api<{admins:AdminAccount[]}>('/admin/admin-users'),
+        api<{controls:PlatformControls}>('/admin/platform-controls'),
+      ]);
+      setPlans(p.plans);setAdminAccounts(a.admins);setPlatformControls(c.controls);
+    }
     try{const audit=await api<{logs:AuditLog[]}>('/admin/audit-logs');setAuditLogs(audit.logs);setAuditAllowed(true);}catch{setAuditLogs([]);setAuditAllowed(false);}
   }catch(e:any){notify(e.message,'error');}finally{setLoading(false);}},[notify,canReview,isSuper]);
   useEffect(()=>{void load();},[]);
@@ -141,11 +157,41 @@ export function AdminPage({notify,role}:{notify:Notify;role:string}) {
   const updateAdminStatus=async(admin:AdminAccount)=>{const next=admin.account_status==='ACTIVE'?'SUSPENDED':'ACTIVE';const reason=window.prompt(`Reason for changing ${admin.username} to ${next}:`);if(!reason)return;try{await api(`/admin/admin-users/${admin.id}/status`,{method:'PATCH',body:JSON.stringify({status:next,reason})});notify('Administrator account status updated.');await load();}catch(e:any){notify(e.message,'error');}};
   const defaultAdminPermission=(account:AdminAccount,key:string)=>account.overrides?.[key]??(account.role==='ADMIN'&&['users.status','payments.read','payments.verify','subscriptions.grant','plans.read','audit.read'].includes(key));
   const createAdmin=async(e:FormEvent)=>{e.preventDefault();try{await api('/admin/admin-users',{method:'POST',body:JSON.stringify(adminForm)});setAdminForm({username:'',email:'',password:'',role:'SUPPORT_ADMIN'});notify('Administrator account created. Share credentials securely with that person.');}catch(e:any){notify(e.message,'error');}};
+  const savePlatformControls=async()=>{
+    if(platformControls.maintenanceEnabled&&platformControls.maintenanceReason.trim().length<4){notify('Enter a maintenance reason of at least 4 characters.','error');return;}
+    if(platformControls.registrationPaused&&platformControls.registrationReason.trim().length<4){notify('Enter a registration-pause message of at least 4 characters.','error');return;}
+    setPlatformSaving(true);
+    try{
+      const result=await api<{controls:PlatformControls}>('/admin/platform-controls',{method:'PUT',body:JSON.stringify(platformControls)});
+      setPlatformControls(result.controls);
+      notify('Global platform controls saved. Student access will update immediately.');
+    }catch(e:any){notify(e.message,'error');}
+    finally{setPlatformSaving(false);}
+  };
   const changeStatus=async(user:AdminUser)=>{const next=user.account_status==='ACTIVE'?'SUSPENDED':'ACTIVE';const reason=window.prompt(`Reason for changing ${user.username} to ${next}:`);if(!reason)return;try{await api(`/admin/users/${user.id}/status`,{method:'PATCH',body:JSON.stringify({status:next,reason})});notify(`Account status changed to ${next}.`);await load();}catch(e:any){notify(e.message,'error');}};
   if(loading&&!overview)return <div className="saas-loading"><span className="spinner"/>Loading administration…</div>;
   if(!overview)return <div className="panel saas-empty"><AlertCircle/><h3>Admin dashboard unavailable</h3><p>Check your administrator permissions and refresh.</p><button className="btn btn-secondary" onClick={()=>void load()}><RefreshCw size={15}/> Retry</button></div>;
   return <div className="saas-page">
     <div className="page-heading"><div><div className="eyebrow">ATTENDLY CONTROL CENTRE</div><h1>Administration</h1><p>Manage student accounts, review payments and monitor subscription activity.</p></div><button className="btn btn-secondary" onClick={()=>void load()}><RefreshCw size={15}/> Refresh</button></div>
+    {isSuper&&<section className="panel admin-section platform-controls-panel">
+      <div className="panel-header"><div><div className="panel-kicker">GLOBAL ACCESS MANAGEMENT</div><h3>Platform controls</h3><p className="admin-help">Temporarily close student access for maintenance or pause new registrations during your testing rollout. These controls are enforced by the Worker API, not only by the interface.</p></div><span className="admin-count">SUPER ADMIN ONLY</span></div>
+      <div className="platform-control-grid">
+        <article className={`platform-control-card ${platformControls.maintenanceEnabled?'is-enabled':''}`}>
+          <div className="platform-control-title"><span className="platform-control-icon maintenance"><Wrench size={18}/></span><div><strong>Maintenance mode</strong><small>{platformControls.maintenanceEnabled?'Student access is currently blocked':'Student access is currently available'}</small></div></div>
+          <label className="platform-toggle"><input type="checkbox" checked={platformControls.maintenanceEnabled} onChange={e=>setPlatformControls(v=>({...v,maintenanceEnabled:e.target.checked}))}/><span>{platformControls.maintenanceEnabled?'Turn maintenance off':'Turn maintenance on'}</span></label>
+          <label className="platform-field-label">Reason category<select value={platformControls.maintenanceType} onChange={e=>setPlatformControls(v=>({...v,maintenanceType:e.target.value}))}><option value="MAINTENANCE">Scheduled maintenance</option><option value="NEW_UPDATE">New update</option><option value="PROBLEM_FIX">Problem fix</option><option value="OTHER">Other</option></select></label>
+          <label className="platform-field-label">Message shown to students<textarea rows={3} maxLength={500} value={platformControls.maintenanceReason} onChange={e=>setPlatformControls(v=>({...v,maintenanceReason:e.target.value}))} placeholder="Example: We are updating the attendance system. Please check back shortly."/></label>
+          <p className="platform-control-hint">Admins can still sign in and use the Administration panel. All student API requests are blocked while this is on.</p>
+        </article>
+        <article className={`platform-control-card ${platformControls.registrationPaused?'is-enabled':''}`}>
+          <div className="platform-control-title"><span className="platform-control-icon registration"><UserPlus size={18}/></span><div><strong>Registration control</strong><small>{platformControls.registrationPaused?'New registrations are paused':'New registrations are open'}</small></div></div>
+          <label className="platform-toggle"><input type="checkbox" checked={platformControls.registrationPaused} onChange={e=>setPlatformControls(v=>({...v,registrationPaused:e.target.checked}))}/><span>{platformControls.registrationPaused?'Reopen registration':'Pause new registrations'}</span></label>
+          <label className="platform-field-label">Message shown on the registration screen<textarea rows={3} maxLength={500} value={platformControls.registrationReason} onChange={e=>setPlatformControls(v=>({...v,registrationReason:e.target.value}))} placeholder="Example: Our initial beta testing slots are full. We will reopen registration soon."/></label>
+          <p className="platform-control-hint">Existing students can continue using Attendly. Only creating new accounts and completing pending registration is blocked.</p>
+        </article>
+      </div>
+      <div className="platform-controls-footer"><span>Changes are saved only when you click Save controls.</span><button className="btn btn-primary" onClick={()=>void savePlatformControls()} disabled={platformSaving}><Save size={15}/>{platformSaving?'Saving controls…':'Save controls'}</button></div>
+    </section>}
     <div className="admin-metric-grid">
       <div className="metric-card"><div className="metric-top"><span>Total students</span><Users size={17}/></div><strong>{overview.users.total}</strong><small>{overview.users.active} active accounts</small></div>
       <div className="metric-card"><div className="metric-top"><span>Free users</span><Activity size={17}/></div><strong>{overview.users.free}</strong><small>Current Free subscriptions</small></div>

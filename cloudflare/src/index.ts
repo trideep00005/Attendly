@@ -7,6 +7,7 @@ import { handleAdmin } from "./modules/admin";
 import { handleAdminBootstrap } from "./modules/admin-bootstrap";
 import { handleLegal } from "./modules/legal";
 import { allowRate, requestIp } from "./lib/rate-limit";
+import { getPlatformControls, maintenanceBlockedResponse } from "./lib/platform-controls";
 
 const API_PREFIX = "/api/";
 
@@ -50,16 +51,6 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
   if (!url.pathname.startsWith(API_PREFIX)) return env.ASSETS.fetch(request);
 
   try {
-    if (url.pathname === "/api/health" && request.method === "GET") {
-      const result = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
-      return json({
-        ok: result?.ok === 1,
-        app: env.APP_NAME || "Attendly",
-        database: "connected",
-        deploymentStage: "cloud-saas-account-security",
-      });
-    }
-
     if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method.toUpperCase())) {
       if (!validateOrigin(request) || request.headers.get("sec-fetch-site") === "cross-site") {
         return json({ error: "Cross-site request rejected." }, 403);
@@ -70,6 +61,33 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
     if (request.method !== "GET" && url.pathname !== "/api/admin/bootstrap") {
       const allowed = await allowRate(env, "write-api-ip", requestIp(request), 240, 60);
       if (!allowed) return json({ error: "Too many requests. Please slow down and try again." }, 429, { "retry-after": "60" });
+    }
+
+    // During maintenance, expose only the read-only status endpoint and the
+    // administrator authentication flow. Every other API request requires an
+    // already authenticated non-student account. The password login endpoint
+    // is handled separately so it can reject STUDENT credentials after lookup.
+    const platformControls = await getPlatformControls(env);
+    const isPublicStatus = url.pathname === "/api/status" && request.method === "GET";
+    const isAdminLoginFlow =
+      (url.pathname === "/api/auth/login" && request.method === "POST") ||
+      (url.pathname === "/api/auth/admin-login/verify" && request.method === "POST") ||
+      (url.pathname === "/api/auth/admin-login/resend" && request.method === "POST");
+    if (platformControls.maintenanceEnabled && !isPublicStatus && !isAdminLoginFlow) {
+      const maintenanceAuth = await authenticate(request, env);
+      if (!maintenanceAuth || maintenanceAuth.user.role === "STUDENT") {
+        return maintenanceBlockedResponse(platformControls.maintenanceReason);
+      }
+    }
+
+    if (url.pathname === "/api/health" && request.method === "GET") {
+      const result = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
+      return json({
+        ok: result?.ok === 1,
+        app: env.APP_NAME || "Attendly",
+        database: "connected",
+        deploymentStage: "cloud-saas-account-security",
+      });
     }
 
     const bootstrapResponse = await handleAdminBootstrap(request, env);
