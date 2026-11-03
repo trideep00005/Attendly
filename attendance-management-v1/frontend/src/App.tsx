@@ -12,6 +12,7 @@ import { jsPDF } from 'jspdf';
 import { AdminPage, SubscriptionPage } from './pages/SaasPages';
 import autoTable from 'jspdf-autotable';
 import { LegalPage, PolicyDocumentModal, type PolicyKey } from './pages/LegalPages';
+import { InstallAttendlyPage } from './pages/InstallAttendlyPage';
 
 type Status = 'PRESENT'|'ABSENT'|'HOLIDAY'|'OTHER';
 type PlatformStatus = {
@@ -39,7 +40,7 @@ const todayISO = () => { const d=new Date(); return `${d.getFullYear()}-${String
 const initialMonth = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; };
 const initials = (s:string) => s.split(/\s+/).map(x=>x[0]).join('').slice(0,2).toUpperCase();
 
-const APP_PAGES = ['Dashboard','Calendar','Analytics','Semesters','Subjects','Attendance Categories','Reports & Backup','Settings','Subscription','Legal & Privacy','Administration','More'];
+const APP_PAGES = ['Dashboard','Calendar','Analytics','Semesters','Subjects','Attendance Categories','Reports & Backup','Settings','Subscription','Legal & Privacy','Administration','More','Install Attendly'];
 const pageSlug = (name:string) => name.toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
 const pageHash = (name:string) => `#/${pageSlug(name)}`;
 const pageFromHash = () => {
@@ -50,11 +51,54 @@ const pageFromHash = () => {
   return APP_PAGES.find(name => pageSlug(name) === slug.toLowerCase()) ?? 'Dashboard';
 };
 
+type DeferredInstallPrompt = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+};
+type InstallOutcome = 'accepted' | 'dismissed' | 'unavailable';
+
 function App(){
   const [boot,setBoot]=useState(true); const [setup,setSetup]=useState(false); const [user,setUser]=useState(''); const [role,setRole]=useState('STUDENT'); const [platformStatus,setPlatformStatus]=useState<PlatformStatus|null>(null);
   const [page,setPageState]=useState(()=>pageFromHash()); const [semesters,setSemesters]=useState<Semester[]>([]); const [semesterId,setSemesterId]=useState<number|null>(null);
   const [notice,setNotice]=useState<{kind:'error'|'success';text:string}|null>(null); const [sidebarOpen,setSidebarOpen]=useState(false);
   const [showCreate,setShowCreate]=useState(false);
+  const [deferredInstallPrompt,setDeferredInstallPrompt]=useState<DeferredInstallPrompt|null>(null);
+  const [pwaInstalled,setPwaInstalled]=useState(false);
+  useEffect(()=>{
+    const displayMode=window.matchMedia('(display-mode: standalone)');
+    const standalone=()=>displayMode.matches || (navigator as Navigator & {standalone?:boolean}).standalone===true;
+    setPwaInstalled(standalone());
+    const onBeforeInstallPrompt=(event:Event)=>{
+      event.preventDefault();
+      setDeferredInstallPrompt(event as DeferredInstallPrompt);
+    };
+    const onAppInstalled=()=>{
+      setPwaInstalled(true);
+      setDeferredInstallPrompt(null);
+    };
+    const onDisplayModeChange=()=>setPwaInstalled(standalone());
+    window.addEventListener('beforeinstallprompt',onBeforeInstallPrompt);
+    window.addEventListener('appinstalled',onAppInstalled);
+    displayMode.addEventListener('change',onDisplayModeChange);
+    return ()=>{
+      window.removeEventListener('beforeinstallprompt',onBeforeInstallPrompt);
+      window.removeEventListener('appinstalled',onAppInstalled);
+      displayMode.removeEventListener('change',onDisplayModeChange);
+    };
+  },[]);
+  const installAttendly=async():Promise<InstallOutcome>=>{
+    if(!deferredInstallPrompt)return 'unavailable';
+    try{
+      const promptEvent=deferredInstallPrompt;
+      await promptEvent.prompt();
+      const choice=await promptEvent.userChoice;
+      setDeferredInstallPrompt(null);
+      if(choice.outcome==='accepted')setPwaInstalled(true);
+      return choice.outcome;
+    }catch{
+      return 'unavailable';
+    }
+  };
   const navigatePage=useCallback((nextPage:string)=>{
     const next=APP_PAGES.includes(nextPage)?nextPage:'Dashboard';
     if(next!==page){window.history.pushState({attendlyPage:next},'',pageHash(next));setPageState(next);window.scrollTo({top:0,behavior:'auto'});}
@@ -135,7 +179,8 @@ function App(){
         {page==='Reports & Backup'&&<ReportsPage {...contentProps} notify={notify}/>}
         {page==='Subscription'&&<SubscriptionPage notify={notify}/>}{page==='Legal & Privacy'&&<LegalPage notify={notify}/>}
         {page==='Administration'&&role!=='STUDENT'&&<AdminPage notify={notify} role={role}/>}
-        {page==='More'&&<MorePage nav={nav} user={user} onNavigate={navigatePage} onLogout={logout}/>}
+        {page==='More'&&<MorePage nav={nav} user={user} onNavigate={navigatePage} onLogout={logout} isInstalled={pwaInstalled}/>}
+        {page==='Install Attendly'&&<InstallAttendlyPage canInstall={Boolean(deferredInstallPrompt)} isInstalled={pwaInstalled} onInstall={installAttendly}/>}
       </div>
       <footer className="footer"><span>Attendly · Student Academic Workspace</span><span><ShieldCheck size={13}/> Account-protected records</span></footer>
     </main>
@@ -153,7 +198,7 @@ function App(){
   </div>;
 }
 
-function MorePage({nav,user,onNavigate,onLogout}:{nav:{name:string;icon:LucideIcon;section:string}[];user:string;onNavigate:(page:string)=>void;onLogout:()=>void}){
+function MorePage({nav,user,onNavigate,onLogout,isInstalled}:{nav:{name:string;icon:LucideIcon;section:string}[];user:string;onNavigate:(page:string)=>void;onLogout:()=>void;isInstalled:boolean}){
   const sections=[
     {key:'MANAGE',title:'Manage'},
     {key:'ACCOUNT',title:'Account'},
@@ -161,6 +206,12 @@ function MorePage({nav,user,onNavigate,onLogout}:{nav:{name:string;icon:LucideIc
   ].map(section=>({...section,items:nav.filter(item=>item.section===section.key&&item.name!=='Subjects')})).filter(section=>section.items.length>0);
   return <>
     <PageHeading eyebrow="YOUR WORKSPACE" title="More" description="Tools and account options in one place."/>
+    <button type="button" className="more-install-card" onClick={()=>onNavigate('Install Attendly')}>
+      <span className="more-install-icon"><ArrowDownToLine size={21}/></span>
+      <span className="more-install-copy"><strong>{isInstalled?'Attendly is installed':'Install Attendly'}</strong><small>{isInstalled?'Open Attendly directly from your home screen.':'Get quick access from your phone home screen.'}</small></span>
+      <span className={`more-install-status ${isInstalled?'installed':''}`}>{isInstalled?'Installed':'New'}</span>
+      <ChevronRight size={18} className="more-link-arrow"/>
+    </button>
     <div className="more-page-layout">
       <div className="more-sections">
         {sections.map(section=><section className="panel more-group" key={section.key}>

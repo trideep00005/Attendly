@@ -1355,3 +1355,60 @@ input:focus, select:focus, textarea:focus { border-color: #9db0f5; box-shadow: 0
 }
 
 .platform-reason-tag { display:inline-flex; align-items:center; border-radius:20px; padding:3px 7px; background:rgba(184,107,44,.1); color:#a96025; font-size:10px; font-weight:800; letter-spacing:.2px; }
+
+
+/* PWA installation page and More-page install shortcut. */
+.more-install-card { width:100%; display:flex; align-items:center; gap:12px; min-height:78px; margin:0 0 14px; padding:13px 15px; border:1px solid #dfe7ff; border-radius:14px; background:linear-gradient(105deg,#f5f7ff 0%,#ffffff 72%); color:#344159; text-align:left; cursor:pointer; box-shadow:0 5px 16px rgba(63,88,160,.045); transition:border-color .16s,transform .16s,box-shadow .16s; }
+.more-install-card:hover { border-color:#b9c9ff; transform:translateY(-1px); box-shadow:0 8px 20px rgba(63,88,160,.08); }
+.more-install-icon { display:grid; place-items:center; width:43px; height:43px; flex:0 0 43px; border-radius:13px; background:#e9efff; color:#4e70df; }
+.more-install-copy { display:grid; flex:1; min-width:0; gap:4px; }
+.more-install-copy strong { color:#35425a; font:800 14px Manrope,sans-serif; }
+.more-install-copy small { color:#8793a7; font-size:12px; line-height:1.4; }
+.more-install-status { border-radius:20px; padding:4px 9px; background:#e8f7ef; color:#16834d; font-size:10px; font-weight:800; }
+.more-install-status.installed { background:#e9f7ee; color:#198754; }
+.install-app-page { max-width:1050px; }
+.install-hero { display:flex; align-items:center; gap:22px; padding:24px; border-color:#e3e9f5; background:linear-gradient(115deg,#f1f4ff 0%,#fff 72%); }
+.install-app-icon { display:grid; place-items:center; width:100px; height:100px; flex:0 0 100px; border-radius:25px; background:#fff; box-shadow:0 10px 26px rgba(55,80,150,.12); overflow:hidden; }
+.install-app-icon img { display:block; width:100%; height:100%; object-fit:cover; }
+.install-hero-copy { min-width:0; }
+.install-kicker { color:#6680d7; font-size:10px; font-weight:800; letter-spacing:1.25px; }
+.install-hero-copy h2 { margin:6px 0 7px; color:#2f3e58; font:800 clamp(20px,3vw,25px) Manrope,sans-serif; letter-spacing:-.5px; }
+.install-hero-copy p { max-width:650px; margin:0 0 14px; color:#75829a; font-size:13px; line-height:1.65; }
+.install-main-button { min-height:42px; padding:10px 16px; }
+.install-success,.install-info { display:flex; align-items:center; gap:8px; width:fit-content; max-width:100%; padding:10px 12px; border-radius:10px; font-size:12px; line-height:1.5; }
+.install-success { background:#eaf8ef; color:#177a49; font-weight:750; }
+.install-info { background:#f0f4ff; color:#52699f; }
+.install-feedback { margin-top:10px !important; color:#52699f !important; font-size:12px !important; }
+.install-platform-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-top:15px; }
+.install-platform-card { min-width:0; padding:17px; border-color:#e7ebf2; }
+.install-platform-card.recommended { border-color:#cad6ff; box-shadow:0 0 0 2px rgba(82,120,235,.06); }
+.install-platform-heading { display:flex; align-items:center; gap:11px; margin-bottom:15px; }
+.install-platform-icon { display:grid; place-items:center; width:42px; height:42px; flex:0 0 42px; border-radius:12px; }
+.install-platform-icon.android { background:#e8f8ee; color:#1d9b5d; }
+.install-platform-icon.apple { background:#eef2ff; color:#526bd0; }
+.install-platform-heading h3 { margin:0; color:#35425a; font:800 14px Manrope,sans-serif; }
+.install-platform-heading p { margin:3px 0 0; color:#929daf; font-size:11px; }
+.install-steps { display:grid; gap:12px; list-style:none; margin:0; padding:0; }
+.install-steps li { display:flex; align-items:flex-start; gap:10px; color:#66748b; font-size:12.5px; line-height:1.55; }
+.install-steps li>span { display:grid; place-items:center; width:23px; height:23px; flex:0 0 23px; border-radius:50%; background:#edf1ff; color:#5275df; font-size:11px; font-weight:850; }
+.install-steps strong { color:#465570; }
+.install-platform-note { margin:14px 0 0; padding:10px 11px; border-radius:9px; background:#f7f8fc; color:#8792a5; font-size:11.5px; line-height:1.6; }
+.install-safe-note { display:flex; gap:11px; align-items:flex-start; margin-top:15px; padding:14px 16px; border:1px solid #d8efdf; border-radius:12px; background:#f0faf3; }
+.install-safe-note>span { display:grid; place-items:center; width:34px; height:34px; flex:0 0 34px; border-radius:10px; background:#ddf5e5; color:#23834e; }
+.install-safe-note strong { color:#26764a; font:800 13px Manrope,sans-serif; }
+.install-safe-note p { margin:4px 0 0; color:#6e927c; font-size:11.5px; line-height:1.55; }
+.install-footnote { display:flex; align-items:flex-start; gap:7px; margin:12px 2px 0; color:#9aa4b4; font-size:11px; line-height:1.5; }
+.install-footnote svg { flex:none; }
+@media(max-width:650px) {
+  .install-hero { align-items:flex-start; gap:14px; padding:15px; }
+  .install-app-icon { width:66px; height:66px; flex-basis:66px; border-radius:18px; }
+  .install-hero-copy h2 { font-size:18px; }
+  .install-hero-copy p { font-size:12px; }
+  .install-platform-grid { grid-template-columns:minmax(0,1fr); gap:10px; }
+  .install-platform-card { padding:14px; }
+  .more-install-card { min-height:70px; padding:11px; gap:9px; }
+  .more-install-icon { width:38px; height:38px; flex-basis:38px; }
+  .more-install-copy strong { font-size:12.5px; }
+  .more-install-copy small { font-size:10.5px; }
+  .more-install-status { padding:4px 7px; font-size:9px; }
+}
