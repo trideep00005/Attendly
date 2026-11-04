@@ -47,9 +47,19 @@ export async function readJson<T = Record<string, unknown>>(request: Request): P
 }
 
 export class HttpError extends Error {
-  constructor(public status: number, message: string) {
+  readonly code?: string;
+  readonly details: Record<string, unknown>;
+
+  constructor(
+    public status: number,
+    message: string,
+    code?: string,
+    details: Record<string, unknown> = {},
+  ) {
     super(message);
     this.name = "HttpError";
+    this.code = code;
+    this.details = details;
   }
 }
 

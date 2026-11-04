@@ -327,7 +327,8 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
       isMultiSemesterAllowed(env, userId, auth.user.role),
       getFreeActiveSemesterId(env, userId),
     ]);
-    const canCreateSemester = multiSemesterAllowed || semesterRows.length === 0;
+    const semesterLimit = auth.user.role !== "STUDENT" ? null : (multiSemesterAllowed ? 3 : 1);
+    const canCreateSemester = semesterLimit === null || semesterRows.length < semesterLimit;
     const enriched = await Promise.all(semesterRows.map(async (semester) => ({
       ...await semesterWithStats(env, semester, userId),
       canEdit: multiSemesterAllowed || semester.id === freeActiveSemesterId,
@@ -335,24 +336,36 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
       freeActiveSemesterId,
       accessMode: multiSemesterAllowed ? 'PRO' : 'FREE',
       canCreateSemester,
+      semesterCount: semesterRows.length,
+      semesterLimit,
     })));
     return json(enriched);
   }
 
   if (path === "/api/semesters" && method === "POST") {
     const multiSemesterAllowed = await isMultiSemesterAllowed(env, userId, auth.user.role);
-    if (!multiSemesterAllowed) {
-      const existing = await env.DB.prepare("SELECT COUNT(*) AS total FROM semesters WHERE user_id=?").bind(userId).first<{ total: number }>();
-      if (Number(existing?.total || 0) >= 1) return json({ error: "The Free plan lets you work in one semester. Your existing semesters remain visible; upgrade to Pro to create and edit multiple semesters." }, 403);
-    }
+    const semesterLimit = auth.user.role !== "STUDENT" ? 999999 : (multiSemesterAllowed ? 3 : 1);
     const body = await readJson<{ name?: unknown; startDate?: unknown; endDate?: unknown; targetPercentage?: unknown }>(request);
     const { name, startDate, endDate } = body;
     const targetPercentage = body.targetPercentage === undefined ? 70 : Number(body.targetPercentage);
     if (typeof name !== "string" || name.trim().length < 2 || name.trim().length > 60) return json({ error: "Enter a semester name (2–60 characters)." }, 400);
     if (!isDate(startDate) || !isDate(endDate) || startDate > endDate) return json({ error: "Enter a valid semester date range." }, 400);
     if (!Number.isFinite(targetPercentage) || targetPercentage < 1 || targetPercentage > 100) return json({ error: "Target must be between 1 and 100." }, 400);
+    // Enforce the plan cap in the INSERT statement itself so concurrent requests
+    // cannot create a fourth Pro semester (or a second Free semester).
     const insert = await env.DB.prepare(`INSERT INTO semesters(user_id,name,start_date,end_date,target_percentage,mass_bunk_policy)
-      VALUES(?,?,?,?,?,'EXCLUDE')`).bind(userId, name.trim(), startDate, endDate, targetPercentage).run();
+      SELECT ?,?,?,?,?,'EXCLUDE'
+      WHERE (SELECT COUNT(*) FROM semesters WHERE user_id=?) < ?`)
+      .bind(userId, name.trim(), startDate, endDate, targetPercentage, userId, semesterLimit).run();
+    if (Number(insert.meta.changes || 0) !== 1) {
+      return json({
+        error: multiSemesterAllowed
+          ? "Your Pro plan allows up to 3 semesters. Delete a previous semester and its associated data before creating another."
+          : "The Free plan allows one semester. Your existing semesters remain available; upgrade to Pro for up to 3 semesters.",
+        code: "SEMESTER_LIMIT_REACHED",
+        semesterLimit: multiSemesterAllowed ? 3 : 1,
+      }, 403);
+    }
     const id = number(insert.meta.last_row_id);
     const statements = Array.from({ length: 7 }, (_, weekday) => env.DB.prepare("INSERT INTO timetable(semester_id,weekday,class_count) VALUES(?,?,?)")
       .bind(id, weekday, weekday === 0 || weekday === 6 ? 0 : 5));
@@ -396,8 +409,23 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     if (!(await getSemester(env, id, userId))) return json({ error: "Semester not found." }, 404);
     const writeDenied = await requireWritableSemester(env, userId, auth.user.role, id);
     if (writeDenied) return writeDenied;
-    await env.DB.prepare("DELETE FROM semesters WHERE id=? AND user_id=?").bind(id, userId).run();
-    return json({ ok: true });
+    // A semester is a complete data container. Delete all personal academic records
+    // explicitly in one atomic D1 batch, then delete the parent semester.
+    await env.DB.batch([
+      // Remove semester-scoped audit entries as well as operational records so
+      // deleting a semester does not leave its name/category IDs in user history.
+      env.DB.prepare(`DELETE FROM audit_logs
+        WHERE (target_type='SEMESTER' AND target_id=?)
+           OR (target_type='ATTENDANCE_CATEGORY' AND CAST(target_id AS INTEGER) IN
+               (SELECT id FROM attendance_categories WHERE semester_id=?))`).bind(String(id), id),
+      env.DB.prepare("DELETE FROM attendance WHERE semester_id=?").bind(id),
+      env.DB.prepare("DELETE FROM timetable_subjects WHERE semester_id=?").bind(id),
+      env.DB.prepare("DELETE FROM timetable WHERE semester_id=?").bind(id),
+      env.DB.prepare("DELETE FROM attendance_categories WHERE semester_id=?").bind(id),
+      env.DB.prepare("DELETE FROM subjects WHERE semester_id=?").bind(id),
+      env.DB.prepare("DELETE FROM semesters WHERE id=? AND user_id=?").bind(id, userId),
+    ]);
+    return json({ ok: true, message: "Semester and all associated attendance, subjects, timetable and category records were permanently deleted." });
   }
 
   match = path.match(/^\/api\/semesters\/(\d+)\/timetable$/);

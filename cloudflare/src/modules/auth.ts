@@ -54,16 +54,26 @@ export async function authenticate(request: Request, env: Env): Promise<AuthCont
   if (!token) return null;
   const tokenHash = await sha256(token);
   const row = await env.DB.prepare(`
-    SELECT u.id,u.username,u.email,u.role,u.account_status,u.created_at,s.id AS session_id,s.expires_at
+    SELECT u.id,u.username,u.email,u.role,u.account_status,u.suspension_reason,u.created_at,
+      s.id AS session_id,s.expires_at
     FROM sessions s JOIN app_user u ON u.id=s.user_id
     WHERE s.token_hash=? LIMIT 1
-  `).bind(tokenHash).first<UserRow & { session_id: number; expires_at: string }>();
+  `).bind(tokenHash).first<UserRow & { session_id: number; expires_at: string; suspension_reason: string | null }>();
   if (!row) return null;
-  if (Date.parse(row.expires_at) <= Date.now() || row.account_status !== "ACTIVE") {
+  if (Date.parse(row.expires_at) <= Date.now()) {
     await env.DB.prepare("DELETE FROM sessions WHERE id=?").bind(row.session_id).run();
     return null;
   }
-  const { session_id: _sessionId, expires_at: _expiresAt, ...user } = row;
+  if (row.account_status === "SUSPENDED") {
+    throw new HttpError(403, "Your Attendly account has been suspended. Review the administrator's notice and sign out.", "ACCOUNT_SUSPENDED", {
+      reason: row.suspension_reason || "Your account is temporarily suspended. Please contact Attendly support for assistance.",
+    });
+  }
+  if (row.account_status !== "ACTIVE") {
+    await env.DB.prepare("DELETE FROM sessions WHERE id=?").bind(row.session_id).run();
+    return null;
+  }
+  const { session_id: _sessionId, expires_at: _expiresAt, suspension_reason: _suspensionReason, ...user } = row;
   return { user };
 }
 
@@ -413,12 +423,20 @@ export async function handleAuth(request: Request, env: Env): Promise<Response |
     const accountAllowed = await authRateAllowed(env, request, "login-account", username || "unknown", 10, 900);
     const globalAccountAllowed = await allowRate(env, "login-account-global", username.toLowerCase() || "unknown", 20, 3600);
     if (!ipAllowed || !accountAllowed || !globalAccountAllowed) return json({ error: "Too many sign-in attempts. Please wait before trying again." }, 429, { "retry-after": "900" });
-    const user = await env.DB.prepare(`SELECT id,username,email,password_hash,role,account_status,created_at
+    const user = await env.DB.prepare(`SELECT id,username,email,password_hash,role,account_status,suspension_reason,created_at
       FROM app_user WHERE username=? COLLATE NOCASE LIMIT 1`).bind(username)
-      .first<UserRow & { password_hash: string }>();
-    if (!user || user.account_status !== "ACTIVE" || typeof body.password !== "string" || !(await bcrypt.compare(body.password, user.password_hash))) {
+      .first<UserRow & { password_hash: string; suspension_reason: string | null }>();
+    if (!user || typeof body.password !== "string" || !(await bcrypt.compare(body.password, user.password_hash))) {
       return json({ error: "Incorrect username or password." }, 401);
     }
+    if (user.account_status === "SUSPENDED") {
+      return json({
+        error: "Your Attendly account has been suspended.",
+        code: "ACCOUNT_SUSPENDED",
+        reason: user.suspension_reason || "Your account is temporarily suspended. Please contact Attendly support for assistance.",
+      }, 403);
+    }
+    if (user.account_status !== "ACTIVE") return json({ error: "Incorrect username or password." }, 401);
     if (user.role === "STUDENT") {
       const platform = await getPlatformControls(env);
       if (platform.maintenanceEnabled) {

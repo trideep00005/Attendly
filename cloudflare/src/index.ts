@@ -69,11 +69,12 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
     // is handled separately so it can reject STUDENT credentials after lookup.
     const platformControls = await getPlatformControls(env);
     const isPublicStatus = url.pathname === "/api/status" && request.method === "GET";
-    const isAdminLoginFlow =
+    const isAllowedAuthFlow =
       (url.pathname === "/api/auth/login" && request.method === "POST") ||
       (url.pathname === "/api/auth/admin-login/verify" && request.method === "POST") ||
-      (url.pathname === "/api/auth/admin-login/resend" && request.method === "POST");
-    if (platformControls.maintenanceEnabled && !isPublicStatus && !isAdminLoginFlow) {
+      (url.pathname === "/api/auth/admin-login/resend" && request.method === "POST") ||
+      (url.pathname === "/api/auth/logout" && request.method === "POST");
+    if (platformControls.maintenanceEnabled && !isPublicStatus && !isAllowedAuthFlow) {
       const maintenanceAuth = await authenticate(request, env);
       if (!maintenanceAuth || maintenanceAuth.user.role === "STUDENT") {
         return maintenanceBlockedResponse(platformControls.maintenanceReason);
@@ -131,7 +132,7 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
 
     return json({ error: "API endpoint not found." }, 404);
   } catch (error) {
-    if (error instanceof HttpError) return json({ error: error.message }, error.status);
+    if (error instanceof HttpError) return json({ error: error.message, ...(error.code ? { code: error.code } : {}), ...error.details }, error.status);
     console.error("[Attendly API error]", error);
     return json({ error: "An unexpected server error occurred. Please try again." }, 500);
   }

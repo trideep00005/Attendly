@@ -4,7 +4,12 @@ export const api = async <T = any>(path: string, options: RequestInit = {}): Pro
   const response = await fetch(`/api${path}`, { ...options, headers, credentials: 'same-origin' });
   const type = response.headers.get('content-type') || '';
   const data = type.includes('application/json') ? await response.json() : await response.text();
-  if (!response.ok) throw new Error(data?.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    if (data?.code === 'ACCOUNT_SUSPENDED' && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('attendly:account-suspended', { detail: { reason: data.reason || data.error } }));
+    }
+    throw new Error(data?.error || `Request failed (${response.status})`);
+  }
   return data as T;
 };
 export const downloadFile = async (path:string, filename:string) => {

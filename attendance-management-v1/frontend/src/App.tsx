@@ -25,7 +25,7 @@ type PlatformStatus = {
   maintenanceType?:string;
   emailVerificationRequired?:boolean;
 };
-type Semester = { id:number; name:string; start_date:string; end_date:string; target_percentage:number; percentage:number; present:number; total:number; canEdit?:boolean; isFreeActive?:boolean; freeActiveSemesterId?:number|null; accessMode?:'FREE'|'PRO'; canCreateSemester?:boolean; recoveryClasses?:number|null; safeAbsences?:number|null; remainingScheduled?:number|null; bestCase?:number|null; entitlements?:{recoveryCalculator?:boolean;attendancePlanning?:boolean;subjectAnalytics?:boolean;customCategories?:boolean} };
+type Semester = { id:number; name:string; start_date:string; end_date:string; target_percentage:number; percentage:number; present:number; total:number; canEdit?:boolean; isFreeActive?:boolean; freeActiveSemesterId?:number|null; accessMode?:'FREE'|'PRO'; canCreateSemester?:boolean; semesterCount?:number; semesterLimit?:number|null; recoveryClasses?:number|null; safeAbsences?:number|null; remainingScheduled?:number|null; bestCase?:number|null; entitlements?:{recoveryCalculator?:boolean;attendancePlanning?:boolean;subjectAnalytics?:boolean;customCategories?:boolean} };
 type Stats = { present:number; absent:number; missed:number; pendingPast:number; pendingClasses:number; holiday:number; other:number; excluded:number; total:number; totalClassesHeld:number; percentage:number; target:number; recoveryClasses:number|null; safeAbsences:number|null; remainingScheduled:number|null; bestCase:number|null; recordedSlots:number; recordedDays:number; collegeOpenDays:number; presentDays:number };
 type CalendarDay = { date:string; inSemester:boolean; classCount:number; entries:Record<number,Status>; categoryIds?:Record<number,number|null>; categoryNames?:Record<number,string|null>; categoryEffects?:Record<number,string|null>; subjectByClass?:Record<number,{id:number;name:string;code:string|null}>; recorded:number };
 type SubjectStats = { id:number; name:string; code:string|null; target_percentage:number|null; targetPercentage:number; present:number; absent:number; holiday:number; other:number; excluded:number; total:number; percentage:number; recoveryClasses:number|null; safeAbsences:number|null; remainingScheduled:number|null; bestCase:number|null };
@@ -64,6 +64,16 @@ function App(){
   const [showCreate,setShowCreate]=useState(false);
   const [deferredInstallPrompt,setDeferredInstallPrompt]=useState<DeferredInstallPrompt|null>(null);
   const [pwaInstalled,setPwaInstalled]=useState(false);
+  const [suspensionNotice,setSuspensionNotice]=useState<string|null>(null);
+  const [suspensionSigningOut,setSuspensionSigningOut]=useState(false);
+  useEffect(()=>{
+    const handleSuspended=(event:Event)=>{
+      const detail=(event as CustomEvent<{reason?:string}>).detail;
+      setSuspensionNotice(detail?.reason?.trim() || 'Your Attendly account has been temporarily suspended. Please contact Attendly support for assistance.');
+    };
+    window.addEventListener('attendly:account-suspended',handleSuspended);
+    return ()=>window.removeEventListener('attendly:account-suspended',handleSuspended);
+  },[]);
   useEffect(()=>{
     const displayMode=window.matchMedia('(display-mode: standalone)');
     const standalone=()=>displayMode.matches || (navigator as Navigator & {standalone?:boolean}).standalone===true;
@@ -121,6 +131,20 @@ function App(){
   const notify=(text:string,kind:'error'|'success'='success')=>{setNotice({kind,text});window.setTimeout(()=>setNotice(null),4200);};
   const loadSemesters=useCallback(async()=>{ const data=await api<Semester[]>('/semesters'); setSemesters(data); const preferred=data.find(s=>s.isFreeActive)?.id??data[0]?.id??null; setSemesterId(current=>current && data.some(s=>s.id===current)?current:preferred); },[]);
   useEffect(()=>{ (async()=>{try{const s=await api<PlatformStatus>('/status');setPlatformStatus(s);setSetup(s.setupRequired);if(!s.setupRequired){try{const m=await api<{user:{username:string;role?:string}}>('/auth/me');setUser(m.user.username);setRole(m.user.role||'STUDENT');await loadSemesters();}catch{}}}catch(e:any){notify(e.message,'error');}finally{setBoot(false);}})(); },[loadSemesters]);
+  // Poll authenticated student status so suspension is shown even when the
+  // student is idle on a page that makes no other API requests.
+  useEffect(()=>{
+    if(boot||!user||role!=='STUDENT'||suspensionNotice)return;
+    const check=()=>{if(document.visibilityState==='visible')void api('/auth/me').catch(()=>{});};
+    const timer=window.setInterval(check,15000);
+    window.addEventListener('focus',check);
+    document.addEventListener('visibilitychange',check);
+    return ()=>{
+      window.clearInterval(timer);
+      window.removeEventListener('focus',check);
+      document.removeEventListener('visibilitychange',check);
+    };
+  },[boot,user,role,suspensionNotice]);
   // Poll the read-only public status endpoint so an administrator's global
   // switch is reflected in already-open student tabs without a page refresh.
   useEffect(()=>{
@@ -145,6 +169,16 @@ function App(){
   const activeSemester=semesters.find(s=>s.id===semesterId)??null;
   const chooseFreeActiveSemester=async(id:number)=>{try{await api('/semesters/free-active',{method:'PUT',body:JSON.stringify({semesterId:id})});await loadSemesters();setSemesterId(id);notify('Your Free working semester has been updated. Other semesters remain available in read-only mode.');}catch(e:any){notify(e.message,'error');}};
   const logout=async()=>{try{await api('/auth/logout',{method:'POST'});}finally{setUser('');setRole('STUDENT');setSemesters([]);setSemesterId(null);replacePage('Dashboard');}};
+  const acknowledgeSuspension=async()=>{
+    if(suspensionSigningOut)return;
+    setSuspensionSigningOut(true);
+    try{await api('/auth/logout',{method:'POST'});}catch{/* Clear the local app state even if the network is unavailable. */}
+    setSuspensionNotice(null);
+    setUser('');setRole('STUDENT');setSemesters([]);setSemesterId(null);
+    replacePage('Dashboard');
+    setSuspensionSigningOut(false);
+  };
+  const suspensionLayer=suspensionNotice?<SuspensionNoticeModal reason={suspensionNotice} busy={suspensionSigningOut} onAcknowledge={acknowledgeSuspension}/>:null;
   const nav: {name:string;icon:LucideIcon;section:string}[]=[
     {name:'Dashboard',icon:LayoutDashboard,section:'WORKSPACE'},{name:'Calendar',icon:CalendarDays,section:'WORKSPACE'},
     {name:'Analytics',icon:TrendingUp,section:'WORKSPACE'},{name:'Semesters',icon:GraduationCap,section:'MANAGE'},
@@ -153,9 +187,9 @@ function App(){
     {name:'Subscription',icon:CreditCard,section:'ACCOUNT'},{name:'Legal & Privacy',icon:FileText,section:'ACCOUNT'}
   ];
   if(role!=='STUDENT') nav.push({name:'Administration',icon:Shield,section:'ADMIN'});
-  if(boot) return <div className="boot"><div className="brand-mark"><Activity size={22}/></div><div className="spinner"/><span>Preparing your attendance workspace…</span></div>;
-  if(platformStatus?.maintenanceEnabled && user && role==='STUDENT') return <MaintenanceScreen message={platformStatus.maintenanceReason||'Attendly is temporarily unavailable while we carry out maintenance.'} category={platformStatus.maintenanceType}/>;
-  if(!user) return <AuthScreen setup={setup} platformStatus={platformStatus} onSuccess={async u=>{setUser(u);setSetup(false);try{const m=await api<{user:{role?:string}}>('/auth/me');setRole(m.user.role||'STUDENT');}catch{setRole('STUDENT');}await loadSemesters();}} notify={notify}/>;
+  if(boot) return <>{<div className="boot"><div className="brand-mark"><Activity size={22}/></div><div className="spinner"/><span>Preparing your attendance workspace…</span></div>}{suspensionLayer}</>;
+  if(platformStatus?.maintenanceEnabled && user && role==='STUDENT') return <><MaintenanceScreen message={platformStatus.maintenanceReason||'Attendly is temporarily unavailable while we carry out maintenance.'} category={platformStatus.maintenanceType}/>{suspensionLayer}</>;
+  if(!user) return <><AuthScreen setup={setup} platformStatus={platformStatus} onSuccess={async u=>{setUser(u);setSetup(false);try{const m=await api<{user:{role?:string}}>('/auth/me');setRole(m.user.role||'STUDENT');}catch{setRole('STUDENT');}await loadSemesters();}} notify={notify}/>{suspensionLayer}</>;
   const contentProps={semester:activeSemester,semesters,semesterId,setSemesterId,loadSemesters,notify,canEdit:activeSemester?.canEdit!==false,onChooseFreeActive:chooseFreeActiveSemester,onCreate:()=>setShowCreate(true)};
   return <div className="app-shell">
     {sidebarOpen&&<div className="mobile-scrim" onClick={()=>setSidebarOpen(false)}/>}
@@ -195,6 +229,21 @@ function App(){
     </nav>
     {showCreate&&<SemesterModal onClose={()=>setShowCreate(false)} onCreated={async(id)=>{setShowCreate(false);await loadSemesters();setSemesterId(id);navigatePage('Dashboard');notify('Your semester is ready. Start recording attendance!');}}/>}
     {notice&&<div className={`toast ${notice.kind}`}><span>{notice.kind==='success'?<CheckCircle2 size={18}/>:<AlertCircle size={18}/>}</span>{notice.text}<button className="icon-btn" onClick={()=>setNotice(null)}><X size={15}/></button></div>}
+    {suspensionLayer}
+  </div>;
+}
+
+function SuspensionNoticeModal({reason,busy,onAcknowledge}:{reason:string;busy:boolean;onAcknowledge:()=>void}){
+  return <div className="suspension-modal-backdrop" role="alertdialog" aria-modal="true" aria-labelledby="suspension-title" aria-describedby="suspension-reason">
+    <section className="suspension-modal-card">
+      <div className="suspension-modal-icon"><Shield size={24}/></div>
+      <div className="eyebrow">ATTENDLY ACCOUNT NOTICE</div>
+      <h2 id="suspension-title">Your account is suspended</h2>
+      <p className="suspension-modal-intro"> Your Account  is temporarily suspended. The reason is shown below.</p>
+      <div className="suspension-reason-box"><strong>Reason from Attendly</strong><p id="suspension-reason">{reason}</p></div>
+      <p className="suspension-modal-help">You will be signed out after acknowledging this notice. Contact Attendly support if you need clarification.</p>
+      <button type="button" className="btn btn-primary full" onClick={onAcknowledge} disabled={busy}>{busy?'Signing out…':'Understood · Sign out'} <LogOut size={16}/></button>
+    </section>
   </div>;
 }
 
@@ -421,9 +470,19 @@ function SemestersPage({semester,semesters,semesterId,setSemesterId,loadSemester
   const [switchingId,setSwitchingId]=useState<number|null>(null);
   const canCreate=semesters.length===0||semesters.some((s:Semester)=>s.canCreateSemester===true);
   const isPro=semesters.some((s:Semester)=>s.accessMode==='PRO');
-  const remove=async(s:Semester)=>{if(s.canEdit===false)return;if(!confirm(`Delete ${s.name} and all its attendance records? This cannot be undone.`))return;try{await api(`/semesters/${s.id}`,{method:'DELETE'});await loadSemesters();notify(`${s.name} deleted.`);}catch(e:any){notify(e.message,'error');}};
+  const semesterCount=semesters[0]?.semesterCount??semesters.length;
+  const semesterLimit=semesters[0]?.semesterLimit??(isPro?3:1);
+  const limitReached=!canCreate;
+  const remove=async(s:Semester)=>{
+    if(s.canEdit===false)return;
+    const confirmed=window.confirm(`PERMANENTLY DELETE ${s.name}?\n\nThis will erase ALL data inside this semester, including attendance history, subjects, weekly class routine, subject mappings, attendance categories and semester analytics. This space will then be available for another semester. This action cannot be undone.`);
+    if(!confirmed)return;
+    try{await api(`/semesters/${s.id}`,{method:'DELETE'});await loadSemesters();notify(`${s.name} and all associated semester data were permanently deleted. You can now create another semester if your plan limit allows it.`);}
+    catch(e:any){notify(e.message,'error');}
+  };
   const choose=async(id:number)=>{setSwitchingId(id);try{await onChooseFreeActive(id);}finally{setSwitchingId(null);}};
-  return <><PageHeading eyebrow="ACADEMIC ORGANISATION" title="Your semesters" description="All your semesters remain here. Pro unlocks editing across every semester." action={canCreate?<button className="btn btn-primary" onClick={onCreate}><Plus size={16}/> New semester</button>:<button className="btn btn-primary" onClick={()=>onNavigate('Subscription')}>Unlock more semesters <ArrowRight size={15}/></button>}/>
+  return <><PageHeading eyebrow="ACADEMIC ORGANISATION" title="Your semesters" description="Free includes 1 semester. Pro includes up to 3 semesters. Delete an old semester to free a slot." action={canCreate?<button className="btn btn-primary" onClick={onCreate}><Plus size={16}/> New semester</button>:isPro?<button className="btn btn-secondary" disabled title="Delete an existing semester to create another">Pro limit reached · 3/3</button>:<button className="btn btn-primary" onClick={()=>onNavigate('Subscription')}>Unlock up to 3 semesters <ArrowRight size={15}/></button>}/>
+    {isPro&&<div className="free-semester-info"><div><strong>Pro plan · Up to 3 semesters</strong><span>{limitReached?'You have reached the 3-semester limit. Delete one semester to free a slot. Deleting a semester permanently removes all of its attendance, subjects, routine and category data.':'You can create and manage up to three semesters. You currently use '+semesterCount+' of 3 slots.'}</span></div><span className="free-semester-count">{semesterCount} of 3</span></div>}
     {!isPro&&semesters.length>1&&<div className="free-semester-info"><div><strong>Free plan · One working semester</strong><span>You can view every semester. Choose which one you want to keep editable; the others stay safely read-only until you upgrade.</span></div><span className="free-semester-count">{semesters.filter((s:Semester)=>s.canEdit!==false).length} of 1 editable</span></div>}
     {!semesters.length?<EmptySemester onCreate={onCreate}/>:<div className="semester-grid">{semesters.map((s:Semester)=><div className={`semester-card ${s.id===semesterId?'selected':''} ${s.canEdit===false?'semester-card-readonly':''}`} key={s.id}>
       <div className="semester-card-top"><div className="semester-icon"><GraduationCap size={21}/></div><span className={`status-chip ${s.canEdit===false?'warning':'positive'}`}><span/>{s.accessMode==='PRO'?'Pro access':s.canEdit===false?'Read only':'Free workspace'}</span></div>

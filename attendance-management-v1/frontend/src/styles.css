@@ -1412,3 +1412,16 @@ input:focus, select:focus, textarea:focus { border-color: #9db0f5; box-shadow: 0
   .more-install-copy small { font-size:10.5px; }
   .more-install-status { padding:4px 7px; font-size:9px; }
 }
+
+
+/* Mandatory account suspension notice shown before the client signs out. */
+.suspension-modal-backdrop{position:fixed;inset:0;z-index:10050;display:grid;place-items:center;padding:18px;background:rgba(15,23,42,.66);backdrop-filter:blur(7px);}
+.suspension-modal-card{width:min(100%,460px);padding:28px;border:1px solid #e5e9f2;border-radius:22px;background:#fff;box-shadow:0 28px 90px rgba(8,20,50,.28);}
+.suspension-modal-icon{display:grid;place-items:center;width:52px;height:52px;margin-bottom:16px;border-radius:16px;background:#fff0ef;color:#cf3d3d;}
+.suspension-modal-card h2{margin:7px 0 9px;color:#263247;font:850 23px Manrope,sans-serif;letter-spacing:-.5px;}
+.suspension-modal-intro,.suspension-modal-help{color:#7d899d;font-size:13px;line-height:1.65;}
+.suspension-reason-box{margin:17px 0;padding:15px 16px;border:1px solid #f2d7d5;border-radius:13px;background:#fff8f7;}
+.suspension-reason-box strong{display:block;margin-bottom:7px;color:#9e3434;font-size:12px;font-weight:850;letter-spacing:.02em;}
+.suspension-reason-box p{margin:0;color:#633d42;font-size:14px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;}
+.suspension-modal-help{margin:0 0 17px;font-size:12px;}
+@media(max-width:520px){.suspension-modal-card{padding:22px;border-radius:18px}.suspension-modal-card h2{font-size:21px}}

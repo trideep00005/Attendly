@@ -317,6 +317,80 @@ export async function handleAdmin(request: Request, env: Env, auth: AuthContext)
       message: queued ? `Complimentary Pro access is queued for ${duration} days after the current Pro period.` : `Complimentary Pro access granted for ${duration} days.` });
   }
 
+  const deleteUserMatch = path.match(/^\/api\/admin\/users\/(\d+)$/);
+  if (deleteUserMatch && method === "DELETE") {
+    // Permanent data erasure is deliberately restricted to the Super Admin.
+    if (auth.user.role !== "SUPER_ADMIN") return json({ error: "Only the Super Admin can permanently delete student accounts." }, 403);
+    const targetUserId = Number(deleteUserMatch[1]);
+    if (!Number.isInteger(targetUserId) || targetUserId < 1 || targetUserId === auth.user.id) return json({ error: "Invalid student account." }, 400);
+    const target = await env.DB.prepare("SELECT id,username,email,role FROM app_user WHERE id=?")
+      .bind(targetUserId).first<{ id: number; username: string; email: string | null; role: string }>();
+    if (!target || target.role !== "STUDENT") return json({ error: "Student account not found." }, 404);
+    const body = await readJson<{ confirmUsername?: unknown }>(request);
+    const confirmation = typeof body.confirmUsername === "string" ? body.confirmUsername.trim() : "";
+    if (confirmation.toLowerCase() !== target.username.toLowerCase()) {
+      return json({ error: `Type ${target.username} exactly to confirm permanent deletion.` }, 400);
+    }
+
+    // A student account is a complete personal-data container. Child records
+    // (sessions, semesters, attendance, subjects, timetables, categories,
+    // subscriptions, claims, notifications and policy acceptances) are removed
+    // by the declared ON DELETE CASCADE relationships on app_user.
+    // payment_transactions intentionally has restrictive accounting references,
+    // so check unusual verifier references before deleting anything.
+    const verifierReferences = await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM payment_transactions WHERE verified_by=?"
+    ).bind(targetUserId).first<{ count: number }>();
+    if (Number(verifierReferences?.count || 0) > 0) {
+      return json({
+        error: "This student account is referenced as a payment verifier. Resolve that administrative reference before deleting the account; no data was changed.",
+        code: "ACCOUNT_HAS_PAYMENT_AUDIT_REFERENCE",
+      }, 409);
+    }
+
+    const statements: D1PreparedStatement[] = [];
+    // Remove account-owned financial transactions before payment claims cascade.
+    statements.push(env.DB.prepare(`DELETE FROM payment_transactions
+      WHERE user_id=? OR payment_claim_id IN (SELECT id FROM payment_claims WHERE user_id=?)`)
+      .bind(targetUserId, targetUserId));
+    // Keep other users' administrative/payment records valid if this account was
+    // ever referenced as an actor. Student records themselves are still erased.
+    statements.push(env.DB.prepare("UPDATE user_subscriptions SET activated_by=NULL WHERE activated_by=?").bind(targetUserId));
+    statements.push(env.DB.prepare("UPDATE payment_claims SET reviewed_by=NULL WHERE reviewed_by=?").bind(targetUserId));
+    statements.push(env.DB.prepare("UPDATE app_settings SET updated_by=NULL WHERE updated_by=?").bind(targetUserId));
+    statements.push(env.DB.prepare("UPDATE admin_permission_overrides SET updated_by=? WHERE updated_by=?")
+      .bind(auth.user.id, targetUserId));
+    // Sessions and email OTP payloads are explicitly cleared before account removal.
+    statements.push(env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(targetUserId));
+    if (target.email) {
+      statements.push(env.DB.prepare("DELETE FROM auth_email_otps WHERE email=? COLLATE NOCASE").bind(target.email));
+    }
+    // Remove logs authored by the student and logs that identify their account,
+    // payment claims or attendance categories. Retain only a non-identifying
+    // accountability event after the user row has been deleted.
+    statements.push(env.DB.prepare(`DELETE FROM audit_logs
+      WHERE actor_user_id=?
+        OR (target_type='USER' AND target_id=?)
+        OR (target_type='PAYMENT_CLAIM' AND CAST(target_id AS INTEGER) IN
+            (SELECT id FROM payment_claims WHERE user_id=?))
+        OR (target_type='ATTENDANCE_CATEGORY' AND CAST(target_id AS INTEGER) IN
+            (SELECT id FROM attendance_categories WHERE user_id=?))`)
+      .bind(targetUserId, String(targetUserId), targetUserId, targetUserId));
+
+    const deleteUserStatementIndex = statements.length;
+    statements.push(env.DB.prepare("DELETE FROM app_user WHERE id=? AND role='STUDENT'").bind(targetUserId));
+    statements.push(env.DB.prepare(`INSERT INTO audit_logs(actor_user_id,action,target_type,target_id,reason,metadata_json)
+      VALUES(?,'STUDENT_ACCOUNT_PERMANENTLY_DELETED','USER_ACCOUNT',NULL,
+      'Student account and associated personal data permanently deleted.',json_object('personalDataPurged',true))`)
+      .bind(auth.user.id));
+
+    const deletion = await env.DB.batch(statements);
+    if (Number(deletion[deleteUserStatementIndex]?.meta.changes || 0) !== 1) {
+      return json({ error: "The student account could not be deleted. Refresh the directory and try again." }, 409);
+    }
+    return json({ ok: true, message: `Student account ${target.username} and all associated academic, attendance, routine, subscription and payment data were permanently deleted.` });
+  }
+
   const statusMatch = path.match(/^\/api\/admin\/users\/(\d+)\/status$/);
   if (statusMatch && method === "PATCH") {
     if (!(await requirePermission(env, auth, "users.status"))) return json({ error: "You do not have permission to change account status." }, 403);
@@ -329,12 +403,17 @@ export async function handleAdmin(request: Request, env: Env, auth: AuthContext)
     const target = await env.DB.prepare("SELECT id,role FROM app_user WHERE id=?").bind(targetUserId).first<{ id: number; role: string }>();
     if (!target || target.role !== "STUDENT") return json({ error: "Student account not found." }, 404);
     await env.DB.batch([
-      env.DB.prepare("UPDATE app_user SET account_status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(body.status, targetUserId),
-      ...(body.status === "ACTIVE" ? [] : [env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(targetUserId)]),
+      env.DB.prepare(`UPDATE app_user SET account_status=?,
+        suspension_reason=CASE WHEN ?='SUSPENDED' THEN ? ELSE NULL END,
+        updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(body.status, body.status, body.status === "SUSPENDED" ? reason : null, targetUserId),
+      // Keep sessions only while suspended so each active browser can receive the reason.
+      // Authentication rejects every protected request for a suspended account. On reactivation
+      // (or deactivation), all old sessions are deleted so they cannot silently become valid again.
+      ...(body.status === "SUSPENDED" ? [] : [env.DB.prepare("DELETE FROM sessions WHERE user_id=?").bind(targetUserId)]),
       env.DB.prepare(`INSERT INTO audit_logs(actor_user_id,action,target_type,target_id,reason,metadata_json) VALUES(?,?,?,?,?,?)`)
         .bind(auth.user.id, "STUDENT_STATUS_CHANGED", "USER", String(targetUserId), reason, JSON.stringify({ status: body.status })),
     ]);
-    return json({ ok: true });
+    return json({ ok: true, message: body.status === "SUSPENDED" ? "Student suspended. The notice will be shown on their next app request." : "Student account status updated." });
   }
 
   if (path === "/api/admin/admin-users" && method === "GET") {
