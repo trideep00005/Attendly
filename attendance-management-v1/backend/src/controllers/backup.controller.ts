@@ -1,17 +1,11 @@
 import type { Request, Response } from 'express';
-import * as reportsService from '../services/reports.service.js';
 
-export function downloadBackup(req: Request, res: Response): void {
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Content-Disposition', 'attachment; filename="attendance-backup.json"');
-  res.json(reportsService.createUserBackup(req.userId!));
+/** User-facing JSON backup and restore were removed. Keep a defensive handler so
+ * an accidentally re-mounted legacy route can never export or overwrite data. */
+export function downloadBackup(_req: Request, res: Response): void {
+  res.status(410).json({ error: 'JSON backup has been retired. Use the PDF attendance report instead.' });
 }
 
-export function restoreBackup(req: Request, res: Response): void {
-  try {
-    reportsService.restoreUserBackup(req.userId!, req.body);
-    res.json({ ok: true, message: 'Your backup was restored successfully.' });
-  } catch (error) {
-    res.status(400).json({ error: error instanceof Error ? error.message : 'Could not restore backup.' });
-  }
+export function restoreBackup(_req: Request, res: Response): void {
+  res.status(410).json({ error: 'JSON backup restore has been retired. Your existing attendance data is unchanged.' });
 }

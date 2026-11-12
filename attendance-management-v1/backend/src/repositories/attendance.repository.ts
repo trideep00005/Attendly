@@ -65,71 +65,10 @@ export function getSavedAttendanceForDate(semesterId: number, date: string): Arr
     .all(semesterId, date) as Array<{ class_number: number; status: AttendanceStatus }>;
 }
 
-export function listAttendanceForCsv(semesterId: number): Array<{ attendance_date: string; class_number: number; status: AttendanceStatus; subject: string }> {
-  return db.prepare(`SELECT a.attendance_date,a.class_number,a.status,COALESCE(s.name,'Unassigned') AS subject
-    FROM attendance a LEFT JOIN subjects s ON s.id=a.subject_id WHERE a.semester_id=? ORDER BY a.attendance_date,a.class_number`)
-    .all(semesterId) as Array<{ attendance_date: string; class_number: number; status: AttendanceStatus; subject: string }>;
-}
-
 export function listAttendanceForJson(semesterId: number): unknown[] {
   return db.prepare(`SELECT a.attendance_date,a.class_number,a.status,a.subject_id,s.name AS subject_name,s.code AS subject_code
     FROM attendance a LEFT JOIN subjects s ON s.id=a.subject_id WHERE a.semester_id=? ORDER BY a.attendance_date,a.class_number`)
     .all(semesterId);
-}
-
-export function listUserBackupData(userId: number): Record<string, unknown> {
-  return {
-    version: 2,
-    exportedAt: new Date().toISOString(),
-    semesters: db.prepare('SELECT * FROM semesters WHERE user_id = ? ORDER BY id').all(userId),
-    timetable: db.prepare('SELECT t.* FROM timetable t JOIN semesters s ON s.id=t.semester_id WHERE s.user_id = ? ORDER BY t.id').all(userId),
-    subjects: db.prepare('SELECT sub.* FROM subjects sub JOIN semesters s ON s.id=sub.semester_id WHERE s.user_id = ? ORDER BY sub.id').all(userId),
-    subjectTimetable: db.prepare('SELECT ts.* FROM timetable_subjects ts JOIN semesters s ON s.id=ts.semester_id WHERE s.user_id = ? ORDER BY ts.id').all(userId),
-    attendance: db.prepare('SELECT a.* FROM attendance a JOIN semesters s ON s.id=a.semester_id WHERE s.user_id = ? ORDER BY a.attendance_date,a.class_number').all(userId),
-  };
-}
-
-export function restoreUserBackup(userId: number, data: {
-  semesters: any[]; timetable: any[]; subjects: any[]; subjectTimetable: any[]; attendance: any[];
-}): void {
-  const tx = db.transaction(() => {
-    db.prepare('DELETE FROM semesters WHERE user_id = ?').run(userId);
-    const sem = db.prepare('INSERT INTO semesters(user_id,name,start_date,end_date,target_percentage,mass_bunk_policy,created_at) VALUES(?,?,?,?,?,?,?)');
-    const time = db.prepare('INSERT INTO timetable(semester_id,weekday,class_count) VALUES(?,?,?)');
-    const subj = db.prepare('INSERT INTO subjects(semester_id,name,code,target_percentage,created_at) VALUES(?,?,?,?,?)');
-    const subjectTime = db.prepare('INSERT INTO timetable_subjects(semester_id,weekday,class_number,subject_id) VALUES(?,?,?,?)');
-    const att = db.prepare('INSERT INTO attendance(semester_id,attendance_date,class_number,status,subject_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)');
-    const semesterIdMap = new Map<number, number>();
-    const subjectIdMap = new Map<number, number>();
-    for (const semester of data.semesters) {
-      const info = sem.run(userId, semester.name, semester.start_date, semester.end_date, semester.target_percentage, semester.mass_bunk_policy, semester.created_at ?? new Date().toISOString());
-      semesterIdMap.set(semester.id, Number(info.lastInsertRowid));
-    }
-    for (const row of data.timetable) {
-      const newSemesterId = semesterIdMap.get(row.semester_id);
-      if (!newSemesterId) throw new Error('Invalid timetable data in backup.');
-      time.run(newSemesterId, row.weekday, row.class_count);
-    }
-    for (const subject of data.subjects) {
-      const newSemesterId = semesterIdMap.get(subject.semester_id);
-      if (!newSemesterId) throw new Error('Invalid subject data in backup.');
-      const info = subj.run(newSemesterId, subject.name, subject.code ?? null, subject.target_percentage ?? null, subject.created_at ?? new Date().toISOString());
-      subjectIdMap.set(subject.id, Number(info.lastInsertRowid));
-    }
-    for (const slot of data.subjectTimetable) {
-      const newSemesterId = semesterIdMap.get(slot.semester_id);
-      const newSubjectId = subjectIdMap.get(slot.subject_id);
-      if (!newSemesterId || !newSubjectId) throw new Error('Invalid subject timetable data in backup.');
-      subjectTime.run(newSemesterId, slot.weekday, slot.class_number, newSubjectId);
-    }
-    for (const item of data.attendance) {
-      const newSemesterId = semesterIdMap.get(item.semester_id);
-      const newSubjectId = item.subject_id == null ? null : (subjectIdMap.get(item.subject_id) ?? null);
-      if (!newSemesterId) throw new Error('Invalid attendance data in backup.');
-      att.run(newSemesterId, item.attendance_date, item.class_number, item.status, newSubjectId, item.created_at ?? new Date().toISOString(), item.updated_at ?? new Date().toISOString());
-    }
-  });
-  tx();
 }
 
 export function getMonthlyAttendanceRows(semesterId: number, massBunkPolicy: string): any[] {

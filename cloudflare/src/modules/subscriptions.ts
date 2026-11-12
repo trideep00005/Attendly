@@ -1,4 +1,4 @@
-import type { Env } from "../types";
+import type { EffectivePlanSnapshot, Env } from "../types";
 import { allowRate } from "../lib/rate-limit";
 import { json, readJson } from "../lib/http";
 import type { AuthContext } from "./auth";
@@ -44,17 +44,57 @@ function parseFeatures(value: string): Record<string, unknown> {
   catch { return {}; }
 }
 
-export async function getEffectivePlan(env: Env, userId: number) {
-  await refreshSubscriptionStates(env);
-  return env.DB.prepare(`SELECT us.id AS subscription_id,us.status,us.starts_at,us.expires_at,us.amount_paid_inr,
+/**
+ * Resolve the effective plan with one read-only, user-scoped query.
+ * Expired Pro rows are ignored immediately even if the hourly cron has not
+ * yet materialised the Free subscription row. A due queued Pro row is treated
+ * as active immediately; the scheduled job later normalises its stored status.
+ * This function never runs global UPDATE batches.
+ */
+export async function getEffectivePlan(env: Env, userId: number): Promise<EffectivePlanSnapshot | null> {
+  const current = await env.DB.prepare(`SELECT us.id AS subscription_id,
+      CASE WHEN us.status='PENDING' THEN 'ACTIVE' ELSE us.status END AS status,
+      us.starts_at,us.expires_at,us.amount_paid_inr,
       p.id AS plan_id,p.code AS plan_code,p.name AS plan_name,p.tier,p.features_json,p.duration_days
-    FROM user_subscriptions us JOIN subscription_plans p ON p.id=us.plan_id
-    WHERE us.user_id=? AND us.status='ACTIVE' ORDER BY us.id DESC LIMIT 1`)
-    .bind(userId).first<Record<string, unknown>>();
+    FROM user_subscriptions us
+    JOIN subscription_plans p ON p.id=us.plan_id
+    WHERE us.user_id=? AND (
+      (us.status='ACTIVE' AND (p.tier='FREE' OR us.expires_at IS NULL OR datetime(us.expires_at)>datetime('now')))
+      OR
+      (us.status='PENDING' AND p.tier='PRO' AND us.starts_at IS NOT NULL
+        AND datetime(us.starts_at)<=datetime('now')
+        AND (us.expires_at IS NULL OR datetime(us.expires_at)>datetime('now')))
+    )
+    ORDER BY CASE WHEN p.tier='PRO' THEN 0 ELSE 1 END,
+      CASE WHEN us.status='ACTIVE' THEN 0 ELSE 1 END,
+      us.id DESC
+    LIMIT 1`).bind(userId).first<EffectivePlanSnapshot>();
+  if (current) return current;
+
+  // If a previous Pro row was superseded and the hourly cron has not run yet,
+  // still enforce Free permissions without writing or globally refreshing data.
+  const free = await env.DB.prepare(`SELECT id AS plan_id,code AS plan_code,name AS plan_name,
+      tier,features_json,duration_days FROM subscription_plans
+    WHERE code='FREE' AND enabled=1 LIMIT 1`).first<Omit<EffectivePlanSnapshot,
+      'subscription_id'|'status'|'starts_at'|'expires_at'|'amount_paid_inr'>>();
+  if (!free) return null;
+  return {
+    subscription_id: null,
+    status: 'ACTIVE',
+    starts_at: null,
+    expires_at: null,
+    amount_paid_inr: 0,
+    ...free,
+  };
 }
 
-export async function hasFeature(env: Env, userId: number, feature: string): Promise<boolean> {
-  const current = await getEffectivePlan(env, userId);
+export async function hasFeature(
+  env: Env,
+  userId: number,
+  feature: string,
+  resolvedPlan?: EffectivePlanSnapshot | null,
+): Promise<boolean> {
+  const current = resolvedPlan === undefined ? await getEffectivePlan(env, userId) : resolvedPlan;
   if (!current) return false;
   const features = parseFeatures(String(current.features_json || "{}"));
   return features[feature] === true;
@@ -71,10 +111,9 @@ export async function handleSubscriptions(request: Request, env: Env, auth: Auth
   const userId = auth.user.id;
 
   if (path === "/api/billing/overview" && method === "GET") {
-    await refreshSubscriptionStates(env);
     const [planResult, current, historyResult, claimsResult, transactionsResult] = await Promise.all([
       env.DB.prepare("SELECT * FROM subscription_plans WHERE enabled=1 ORDER BY sort_order,price_inr").all<PlanRow>(),
-      getEffectivePlan(env, userId),
+      auth.plan === undefined ? getEffectivePlan(env, userId) : Promise.resolve(auth.plan),
       env.DB.prepare(`SELECT us.id,us.status,us.starts_at,us.expires_at,us.amount_paid_inr,us.created_at,
           p.code AS plan_code,p.name AS plan_name,p.tier,p.duration_days
         FROM user_subscriptions us JOIN subscription_plans p ON p.id=us.plan_id

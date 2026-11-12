@@ -2,7 +2,6 @@ import bcrypt from "bcryptjs";
 import type { Env, UserRole } from "../types";
 import { json, readJson } from "../lib/http";
 import type { AuthContext } from "./auth";
-import { refreshSubscriptionStates } from "./subscriptions";
 import { getPlatformControls } from "../lib/platform-controls";
 
 const rows = <T>(result: D1Result<T>): T[] => result.results || [];
@@ -113,8 +112,6 @@ export async function handleAdmin(request: Request, env: Env, auth: AuthContext)
     return json({ ok: true, message: "Global platform controls updated.", controls });
   }
 
-  await refreshSubscriptionStates(env);
-
   if (path === "/api/admin/overview" && method === "GET") {
     if (!(await requirePermission(env, auth, "dashboard.read"))) return json({ error: "You do not have permission to view the admin dashboard." }, 403);
     const now = new Date();
@@ -127,10 +124,27 @@ export async function handleAdmin(request: Request, env: Env, auth: AuthContext)
           SUM(CASE WHEN account_status='ACTIVE' THEN 1 ELSE 0 END) AS active,
           SUM(CASE WHEN account_status<>'ACTIVE' THEN 1 ELSE 0 END) AS inactive
         FROM app_user WHERE role='STUDENT'`).first<Record<string, number>>(),
-      env.DB.prepare(`SELECT p.tier,COUNT(DISTINCT us.user_id) AS users
-        FROM user_subscriptions us JOIN subscription_plans p ON p.id=us.plan_id
-        JOIN app_user u ON u.id=us.user_id
-        WHERE us.status='ACTIVE' AND u.role='STUDENT' GROUP BY p.tier`).all<{ tier: string; users: number }>(),
+      env.DB.prepare(`SELECT COALESCE(p.tier,'FREE') AS tier,COUNT(*) AS users
+        FROM app_user u
+        LEFT JOIN user_subscriptions us ON us.id=(
+          SELECT candidate.id
+          FROM user_subscriptions candidate
+          JOIN subscription_plans cp ON cp.id=candidate.plan_id
+          WHERE candidate.user_id=u.id AND (
+            (candidate.status='ACTIVE' AND (cp.tier='FREE' OR candidate.expires_at IS NULL OR datetime(candidate.expires_at)>datetime('now')))
+            OR
+            (candidate.status='PENDING' AND cp.tier='PRO' AND candidate.starts_at IS NOT NULL
+              AND datetime(candidate.starts_at)<=datetime('now')
+              AND (candidate.expires_at IS NULL OR datetime(candidate.expires_at)>datetime('now')))
+          )
+          ORDER BY CASE WHEN cp.tier='PRO' THEN 0 ELSE 1 END,
+            CASE WHEN candidate.status='ACTIVE' THEN 0 ELSE 1 END,
+            candidate.id DESC
+          LIMIT 1
+        )
+        LEFT JOIN subscription_plans p ON p.id=us.plan_id
+        WHERE u.role='STUDENT'
+        GROUP BY COALESCE(p.tier,'FREE')`).all<{ tier: string; users: number }>(),
       env.DB.prepare("SELECT COUNT(*) AS total FROM payment_claims WHERE status IN ('SUBMITTED','UNDER_REVIEW')").first<{ total: number }>(),
       env.DB.prepare(`SELECT COUNT(*) AS payments,COALESCE(SUM(amount_inr),0) AS total,
           COALESCE(SUM(CASE WHEN substr(verified_at,1,7)=substr(CURRENT_DATE,1,7) THEN amount_inr ELSE 0 END),0) AS month,
@@ -157,9 +171,18 @@ export async function handleAdmin(request: Request, env: Env, auth: AuthContext)
     if (!(await requirePermission(env, auth, "users.read"))) return json({ error: "You do not have permission to view users." }, 403);
     const search = (url.searchParams.get("q") || "").trim().slice(0, 100);
     const result = await env.DB.prepare(`SELECT u.id,u.username,u.email,u.role,u.account_status,u.created_at,
-        p.code AS plan_code,p.name AS plan_name,us.status AS subscription_status,us.expires_at
+        COALESCE(p.code,'FREE') AS plan_code,COALESCE(p.name,'Free') AS plan_name,
+        CASE WHEN us.status='PENDING' THEN 'ACTIVE' ELSE COALESCE(us.status,'ACTIVE') END AS subscription_status,us.expires_at
       FROM app_user u
-      LEFT JOIN user_subscriptions us ON us.id=(SELECT s.id FROM user_subscriptions s WHERE s.user_id=u.id AND s.status='ACTIVE' ORDER BY s.id DESC LIMIT 1)
+      LEFT JOIN user_subscriptions us ON us.id=(SELECT s.id FROM user_subscriptions s
+        JOIN subscription_plans sp ON sp.id=s.plan_id
+        WHERE s.user_id=u.id AND (
+          (s.status='ACTIVE' AND (sp.tier='FREE' OR s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now')))
+          OR (s.status='PENDING' AND sp.tier='PRO' AND s.starts_at IS NOT NULL
+            AND datetime(s.starts_at)<=datetime('now') AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now')))
+        )
+        ORDER BY CASE WHEN sp.tier='PRO' THEN 0 ELSE 1 END,
+          CASE WHEN s.status='ACTIVE' THEN 0 ELSE 1 END, s.id DESC LIMIT 1)
       LEFT JOIN subscription_plans p ON p.id=us.plan_id
       WHERE u.role='STUDENT' AND (?='' OR u.username LIKE '%'||?||'%' OR u.email LIKE '%'||?||'%' OR CAST(u.id AS TEXT)=?)
       ORDER BY u.created_at DESC LIMIT 100`).bind(search, search, search, search).all();

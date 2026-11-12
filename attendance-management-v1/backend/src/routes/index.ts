@@ -7,7 +7,6 @@ import calendarRoutes from './calendar.routes.js';
 import attendanceRoutes from './attendance.routes.js';
 import analyticsRoutes from './analytics.routes.js';
 import reportsRoutes from './reports.routes.js';
-import backupRoutes from './backup.routes.js';
 
 const router = Router();
 router.get('/status', asyncHandler(getStatus));
@@ -17,5 +16,4 @@ router.use('/calendar', calendarRoutes);
 router.use('/attendance', attendanceRoutes);
 router.use('/analytics', analyticsRoutes);
 router.use('/reports', reportsRoutes);
-router.use('/backup', backupRoutes);
 export default router;

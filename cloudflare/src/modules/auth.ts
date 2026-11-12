@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import type { Env, UserRow } from "../types";
+import type { EffectivePlanSnapshot, Env, UserRow } from "../types";
 import { cookieHeader, json, parseCookies, readJson, HttpError, validateOrigin } from "../lib/http";
 import { constantTimeEqual, randomToken, SESSION_COOKIE, SESSION_SECONDS, sha256 } from "../lib/crypto";
 import { authRateAllowed, allowRate, requestIp } from "../lib/rate-limit";
@@ -7,7 +7,7 @@ import { sendOtpEmail } from "./email";
 import { CURRENT_POLICY_VERSIONS } from "./legal";
 import { getPlatformControls } from "../lib/platform-controls";
 
-export interface AuthContext { user: UserRow; }
+export interface AuthContext { user: UserRow; plan?: EffectivePlanSnapshot | null; }
 
 type OtpPurpose = "REGISTER" | "PASSWORD_RESET" | "ADMIN_LOGIN";
 type OtpRow = {

@@ -17,7 +17,7 @@ const dateLabel = (value:string|null|undefined) => value ? new Date(value.replac
 const featureLabels:Record<string,string> = {
   basicAttendance:'Daily attendance tracking', semesterManagement:'Semester management', subjectWiseAttendance:'Subject-wise attendance', basicDashboard:'Basic dashboard',
   attendancePlanning:'Attendance planning tools', recoveryCalculator:'Recovery calculator', customCategories:'Custom attendance categories', subjectAnalytics:'Subject-wise analytics',
-  trendCharts:'Attendance trend charts', pdfCsvExport:'PDF and CSV reports', multipleSemesters:'Multiple semesters', completeHistory:'Complete attendance history',
+  trendCharts:'Attendance trend charts', pdfCsvExport:'PDF attendance reports', multipleSemesters:'Multiple semesters', completeHistory:'Complete attendance history',
 };
 
 export function SubscriptionPage({notify}:{notify:Notify}) {

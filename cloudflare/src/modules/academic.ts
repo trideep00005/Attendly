@@ -1,5 +1,5 @@
-import type { Env, AttendanceStatus, SemesterRow, AttendanceRow, UserRow } from "../types";
-import { HttpError, dateInTimeZone, dateRange, dayOfWeek, isDate, json, readJson, csvCell, validateOrigin } from "../lib/http";
+import type { EffectivePlanSnapshot, Env, AttendanceStatus, SemesterRow, AttendanceRow, UserRow } from "../types";
+import { HttpError, dateInTimeZone, dateRange, dayOfWeek, isDate, json, readJson, validateOrigin } from "../lib/http";
 import type { AuthContext } from "./auth";
 import { hasFeature } from "./subscriptions";
 
@@ -18,18 +18,46 @@ async function getTimetable(env: Env, semesterId: number): Promise<{ weekday: nu
   return rows(result);
 }
 
+/** Returns the latest Pro subscription period that has actually expired.
+ * Its id identifies the current one-time Free semester-selection opportunity.
+ */
+async function getLatestExpiredProSubscriptionId(env: Env, userId: number): Promise<number | null> {
+  const row = await env.DB.prepare(`SELECT us.id
+    FROM user_subscriptions us
+    JOIN subscription_plans p ON p.id=us.plan_id
+    WHERE us.user_id=? AND p.tier='PRO'
+      AND (us.status='EXPIRED' OR (us.status='ACTIVE' AND us.expires_at IS NOT NULL
+        AND datetime(us.expires_at)<=datetime('now')))
+    ORDER BY us.id DESC LIMIT 1`)
+    .bind(userId).first<{ id: number }>();
+  return row ? Number(row.id) : null;
+}
+
 /**
- * Resolves the student's preferred Free-plan working semester. If no valid
- * preference exists (first login, first semester, or the selected semester was
- * deleted), the most recently created semester is selected automatically.
+ * Resolves the student's Free working semester. A missing/deleted preference
+ * may fall back automatically only while the one-time choice for the current
+ * expired Pro subscription is still unused. Once used, it cannot silently
+ * move to another remaining semester.
  */
 async function getFreeActiveSemesterId(env: Env, userId: number): Promise<number | null> {
-  const preference = await env.DB.prepare(`SELECT p.free_active_semester_id
+  const preference = await env.DB.prepare(`SELECT p.free_active_semester_id,
+      p.free_selection_used_for_subscription_id, s.id AS valid_semester_id
     FROM user_semester_preferences p
-    JOIN semesters s ON s.id=p.free_active_semester_id AND s.user_id=p.user_id
+    LEFT JOIN semesters s ON s.id=p.free_active_semester_id AND s.user_id=p.user_id
     WHERE p.user_id=? LIMIT 1`)
-    .bind(userId).first<{ free_active_semester_id: number }>();
-  if (preference) return Number(preference.free_active_semester_id);
+    .bind(userId).first<{
+      free_active_semester_id: number | null;
+      free_selection_used_for_subscription_id: number | null;
+      valid_semester_id: number | null;
+    }>();
+  if (preference?.valid_semester_id != null) return Number(preference.valid_semester_id);
+
+  if (preference?.free_selection_used_for_subscription_id != null) {
+    const latestExpiredProId = await getLatestExpiredProSubscriptionId(env, userId);
+    if (latestExpiredProId != null && Number(preference.free_selection_used_for_subscription_id) === latestExpiredProId) {
+      return null;
+    }
+  }
 
   const fallback = await env.DB.prepare(`SELECT id FROM semesters WHERE user_id=?
     ORDER BY created_at DESC,id DESC LIMIT 1`)
@@ -42,21 +70,34 @@ async function getFreeActiveSemesterId(env: Env, userId: number): Promise<number
   return activeId;
 }
 
-async function isMultiSemesterAllowed(env: Env, userId: number, role: UserRow['role']): Promise<boolean> {
-  return role !== 'STUDENT' || await hasFeature(env, userId, 'multipleSemesters');
+async function getFreeSelectionState(env: Env, userId: number, expiredProId: number | null): Promise<{ used: boolean; canChoose: boolean }> {
+  if (expiredProId == null) return { used: false, canChoose: false };
+  const preference = await env.DB.prepare(`SELECT free_selection_used_for_subscription_id
+    FROM user_semester_preferences WHERE user_id=? LIMIT 1`)
+    .bind(userId).first<{ free_selection_used_for_subscription_id: number | null }>();
+  const used = Number(preference?.free_selection_used_for_subscription_id ?? -1) === expiredProId;
+  return { used, canChoose: !used };
 }
 
-async function canEditSemester(env: Env, userId: number, role: UserRow['role'], semesterId: number): Promise<boolean> {
-  if (await isMultiSemesterAllowed(env, userId, role)) return true;
+async function isMultiSemesterAllowed(env: Env, userId: number, role: UserRow['role'], plan?: EffectivePlanSnapshot | null): Promise<boolean> {
+  return role !== 'STUDENT' || await hasFeature(env, userId, 'multipleSemesters', plan);
+}
+
+async function canEditSemester(env: Env, userId: number, role: UserRow['role'], semesterId: number, plan?: EffectivePlanSnapshot | null): Promise<boolean> {
+  if (await isMultiSemesterAllowed(env, userId, role, plan)) return true;
   return (await getFreeActiveSemesterId(env, userId)) === semesterId;
 }
 
-async function requireWritableSemester(env: Env, userId: number, role: UserRow['role'], semesterId: number): Promise<Response | null> {
-  if (await canEditSemester(env, userId, role, semesterId)) return null;
-  return json({
-    error: 'This semester is read-only on your Free plan. You can continue viewing its history. Choose it as your Free working semester from the Semesters page, or upgrade to Pro to edit all semesters.',
-    code: 'SEMESTER_READ_ONLY',
-  }, 403);
+async function requireWritableSemester(env: Env, userId: number, role: UserRow['role'], semesterId: number, plan?: EffectivePlanSnapshot | null): Promise<Response | null> {
+  if (await canEditSemester(env, userId, role, semesterId, plan)) return null;
+  const expiredProId = await getLatestExpiredProSubscriptionId(env, userId);
+  const selectionState = await getFreeSelectionState(env, userId, expiredProId);
+  const errorMessage = expiredProId == null
+    ? 'This semester is read-only on your Free plan. You can view its history. The one-time semester choice is available only after a Pro subscription expires; upgrade to Pro to edit all semesters.'
+    : selectionState.used
+      ? 'This semester is read-only on your Free plan. Your one-time semester choice has already been used for this expired Pro subscription. Renew Pro to edit all semesters.'
+      : 'This semester is read-only on your Free plan. You can view its history and use your one-time Free semester choice from the Semesters page. After choosing, the selection is locked until you renew Pro.';
+  return json({ error: errorMessage, code: 'SEMESTER_READ_ONLY' }, 403);
 }
 
 function countForDate(schedule: Map<number, number>, date: string): number {
@@ -279,11 +320,11 @@ async function calculateSubjectStats(env: Env, semester: SemesterRow, includeRec
   });
 }
 
-async function semesterWithStats(env: Env, semester: SemesterRow, userId: number) {
+async function semesterWithStats(env: Env, semester: SemesterRow, userId: number, plan?: EffectivePlanSnapshot | null) {
   const [stats, recoveryAllowed, planningAllowed, subjectAnalytics, customCategories, trendCharts] = await Promise.all([
-    calculateStats(env, semester), hasFeature(env, userId, "recoveryCalculator"),
-    hasFeature(env, userId, "attendancePlanning"), hasFeature(env, userId, "subjectAnalytics"),
-    hasFeature(env, userId, "customCategories"), hasFeature(env, userId, "trendCharts"),
+    calculateStats(env, semester), hasFeature(env, userId, "recoveryCalculator", plan),
+    hasFeature(env, userId, "attendancePlanning", plan), hasFeature(env, userId, "subjectAnalytics", plan),
+    hasFeature(env, userId, "customCategories", plan), hasFeature(env, userId, "trendCharts", plan),
   ]);
   return {
     ...semester, ...stats,
@@ -300,40 +341,72 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
   const path = url.pathname;
   const method = request.method.toUpperCase();
   const userId = auth.user.id;
+  const plan = auth.plan;
 
   if (path === "/api/semesters/free-active" && method === "PUT") {
+    if (await isMultiSemesterAllowed(env, userId, auth.user.role, plan)) {
+      return json({ error: "Pro already allows editing all your semesters. This one-time selection is only available after Pro expires." }, 409);
+    }
+    const expiredProId = await getLatestExpiredProSubscriptionId(env, userId);
+    if (expiredProId == null) {
+      return json({ error: "The one-time Free semester choice is available after a Pro subscription expires.", code: "FREE_SEMESTER_SELECTION_NOT_AVAILABLE" }, 403);
+    }
+    const selectionState = await getFreeSelectionState(env, userId, expiredProId);
+    if (!selectionState.canChoose) {
+      return json({ error: "You have already used your one-time Free semester selection for this expired Pro subscription. You can still view every semester, but only your selected semester is editable. Renew Pro to edit the others.", code: "FREE_SEMESTER_SELECTION_ALREADY_USED" }, 409);
+    }
+
     const body = await readJson<{ semesterId?: unknown }>(request);
     const semesterId = Number(body.semesterId);
     if (!Number.isInteger(semesterId) || semesterId < 1) return json({ error: "Select a valid semester." }, 400);
     const selected = await getSemester(env, semesterId, userId);
     if (!selected) return json({ error: "Semester not found in your account." }, 404);
-    await env.DB.batch([
-      env.DB.prepare(`INSERT INTO user_semester_preferences(user_id,free_active_semester_id)
-        VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET
-          free_active_semester_id=excluded.free_active_semester_id,updated_at=CURRENT_TIMESTAMP`)
-        .bind(userId, semesterId),
-      env.DB.prepare(`INSERT INTO audit_logs(actor_user_id,action,target_type,target_id,reason,metadata_json)
-        VALUES(?,'FREE_WORKING_SEMESTER_CHANGED','SEMESTER',?,'Student selected the semester to keep editable on the Free plan',?)`)
-        .bind(userId, String(semesterId), JSON.stringify({ semesterName: selected.name })),
-    ]);
-    return json({ ok: true, freeActiveSemesterId: semesterId, message: `${selected.name} is now your Free working semester.` });
+    const currentActiveId = await getFreeActiveSemesterId(env, userId);
+    if (currentActiveId === semesterId) {
+      return json({ ok: true, freeActiveSemesterId: semesterId, selectionUsed: false, message: `${selected.name} is already your Free working semester.` });
+    }
+
+    // Ensure the preference row exists, then consume the one-time choice with
+    // a conditional UPDATE. Concurrent requests cannot switch it twice.
+    await env.DB.prepare(`INSERT OR IGNORE INTO user_semester_preferences(user_id,free_active_semester_id)
+      VALUES(?,?)`).bind(userId, currentActiveId).run();
+    const updated = await env.DB.prepare(`UPDATE user_semester_preferences
+      SET free_active_semester_id=?,free_selection_used_for_subscription_id=?,updated_at=CURRENT_TIMESTAMP
+      WHERE user_id=?
+        AND (free_selection_used_for_subscription_id IS NULL OR free_selection_used_for_subscription_id<>?)
+        AND EXISTS(SELECT 1 FROM semesters WHERE id=? AND user_id=?)`)
+      .bind(semesterId, expiredProId, userId, expiredProId, semesterId, userId).run();
+    if (Number(updated.meta.changes || 0) !== 1) {
+      return json({ error: "Your one-time Free semester selection has already been used. Renew Pro to change your working semester.", code: "FREE_SEMESTER_SELECTION_ALREADY_USED" }, 409);
+    }
+    await env.DB.prepare(`INSERT INTO audit_logs(actor_user_id,action,target_type,target_id,reason,metadata_json)
+      VALUES(?,'FREE_WORKING_SEMESTER_SELECTED_ONCE','SEMESTER',?,'Student used the one-time Free semester selection after Pro expiry',?)`)
+      .bind(userId, String(semesterId), JSON.stringify({ semesterName: selected.name, expiredProSubscriptionId: expiredProId })).run();
+    return json({ ok: true, freeActiveSemesterId: semesterId, selectionUsed: true, message: `${selected.name} is now your Free working semester. This choice is locked until you renew Pro.` });
   }
 
   if (path === "/api/semesters" && method === "GET") {
     const result = await env.DB.prepare("SELECT * FROM semesters WHERE user_id=? ORDER BY start_date DESC,created_at DESC,id DESC")
       .bind(userId).all<SemesterRow>();
     const semesterRows = rows(result);
-    const [multiSemesterAllowed, freeActiveSemesterId] = await Promise.all([
-      isMultiSemesterAllowed(env, userId, auth.user.role),
+    const [multiSemesterAllowed, freeActiveSemesterId, expiredProId] = await Promise.all([
+      isMultiSemesterAllowed(env, userId, auth.user.role, plan),
       getFreeActiveSemesterId(env, userId),
+      getLatestExpiredProSubscriptionId(env, userId),
     ]);
+    const freeSelectionState = multiSemesterAllowed
+      ? { used: false, canChoose: false }
+      : await getFreeSelectionState(env, userId, expiredProId);
+    const canChooseFreeSemester = !multiSemesterAllowed && semesterRows.length > 1 && freeSelectionState.canChoose;
     const semesterLimit = auth.user.role !== "STUDENT" ? null : (multiSemesterAllowed ? 3 : 1);
     const canCreateSemester = semesterLimit === null || semesterRows.length < semesterLimit;
     const enriched = await Promise.all(semesterRows.map(async (semester) => ({
-      ...await semesterWithStats(env, semester, userId),
+      ...await semesterWithStats(env, semester, userId, plan),
       canEdit: multiSemesterAllowed || semester.id === freeActiveSemesterId,
       isFreeActive: semester.id === freeActiveSemesterId,
       freeActiveSemesterId,
+      canChooseFreeSemester,
+      freeSelectionUsed: freeSelectionState.used,
       accessMode: multiSemesterAllowed ? 'PRO' : 'FREE',
       canCreateSemester,
       semesterCount: semesterRows.length,
@@ -343,7 +416,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
   }
 
   if (path === "/api/semesters" && method === "POST") {
-    const multiSemesterAllowed = await isMultiSemesterAllowed(env, userId, auth.user.role);
+    const multiSemesterAllowed = await isMultiSemesterAllowed(env, userId, auth.user.role, plan);
     const semesterLimit = auth.user.role !== "STUDENT" ? 999999 : (multiSemesterAllowed ? 3 : 1);
     const body = await readJson<{ name?: unknown; startDate?: unknown; endDate?: unknown; targetPercentage?: unknown }>(request);
     const { name, startDate, endDate } = body;
@@ -383,7 +456,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     }
     await ensureDefaultOtherCategory(env, { id, user_id: userId, name: name.trim(), start_date: startDate, end_date: endDate, target_percentage: targetPercentage, mass_bunk_policy: "EXCLUDE", created_at: new Date().toISOString() });
     const semester = await getSemester(env, id, userId);
-    return json(semester ? await semesterWithStats(env, semester, userId) : { id }, 201);
+    return json(semester ? await semesterWithStats(env, semester, userId, plan) : { id }, 201);
   }
 
   let match = path.match(/^\/api\/semesters\/(\d+)$/);
@@ -391,7 +464,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     const id = Number(match[1]);
     const semester = await getSemester(env, id, userId);
     if (!semester) return json({ error: "Semester not found." }, 404);
-    const writeDenied = await requireWritableSemester(env, userId, auth.user.role, id);
+    const writeDenied = await requireWritableSemester(env, userId, auth.user.role, id, plan);
     if (writeDenied) return writeDenied;
     const body = await readJson<Record<string, unknown>>(request);
     const name = body.name ?? semester.name;
@@ -402,12 +475,20 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     await env.DB.prepare("UPDATE semesters SET name=?,start_date=?,end_date=?,target_percentage=? WHERE id=? AND user_id=?")
       .bind(name.trim(), startDate, endDate, target, id, userId).run();
     const updated = await getSemester(env, id, userId);
-    return json(updated ? await semesterWithStats(env, updated, userId) : { ok: true });
+    return json(updated ? await semesterWithStats(env, updated, userId, plan) : { ok: true });
   }
   if (match && method === "DELETE") {
     const id = Number(match[1]);
     if (!(await getSemester(env, id, userId))) return json({ error: "Semester not found." }, 404);
-    const writeDenied = await requireWritableSemester(env, userId, auth.user.role, id);
+    const multiSemesterAllowed = await isMultiSemesterAllowed(env, userId, auth.user.role, plan);
+    if (!multiSemesterAllowed && (await getFreeActiveSemesterId(env, userId)) === id) {
+      const remaining = await env.DB.prepare("SELECT COUNT(*) AS total FROM semesters WHERE user_id=? AND id<>?")
+        .bind(userId, id).first<{ total: number }>();
+      if (Number(remaining?.total || 0) > 0) {
+        return json({ error: "You cannot delete your selected Free working semester while other semesters remain read-only. Renew Pro to manage or delete those semesters.", code: "FREE_WORKING_SEMESTER_DELETE_BLOCKED" }, 409);
+      }
+    }
+    const writeDenied = await requireWritableSemester(env, userId, auth.user.role, id, plan);
     if (writeDenied) return writeDenied;
     // A semester is a complete data container. Delete all personal academic records
     // explicitly in one atomic D1 batch, then delete the parent semester.
@@ -434,7 +515,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     if (!(await getSemester(env, id, userId))) return json({ error: "Semester not found." }, 404);
     if (method === "GET") return json(await getTimetable(env, id));
     if (method === "PUT") {
-      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, id);
+      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, id, plan);
       if (writeDenied) return writeDenied;
       const body = await readJson<{ days?: { weekday: number; classCount: number }[] }>(request);
       const days = body.days;
@@ -453,18 +534,21 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     if (!semester) return json({ error: "Semester not found." }, 404);
     await ensureDefaultOtherCategory(env, semester);
     if (method === "GET") {
+      // Grandfathering: all existing active categories remain visible to Free
+      // users and may still be selected for new attendance entries. The Pro
+      // entitlement controls only creation, editing and archiving below.
       const [result, canManageCustom] = await Promise.all([
         env.DB.prepare(`SELECT id,name,description,attendance_effect,is_system,is_active,created_at,updated_at
           FROM attendance_categories WHERE user_id=? AND semester_id=? AND is_active=1 ORDER BY is_system DESC,name COLLATE NOCASE`)
           .bind(userId, semesterId).all(),
-        hasFeature(env, userId, "customCategories"),
+        hasFeature(env, userId, "customCategories", plan),
       ]);
       return json({ categories: rows(result), canManageCustom });
     }
     if (method === "POST") {
-      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId);
+      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId, plan);
       if (writeDenied) return writeDenied;
-      if (!(await hasFeature(env, userId, "customCategories"))) return json({ error: "Custom attendance categories are included in the Pro plan. Upgrade to create your own categories." }, 403);
+      if (!(await hasFeature(env, userId, "customCategories", plan))) return json({ error: "Custom attendance categories are included in the Pro plan. Upgrade to create your own categories." }, 403);
       const body = await readJson<{ name?: unknown; description?: unknown; attendanceEffect?: unknown }>(request);
       const name = typeof body.name === "string" ? body.name.trim() : "";
       const description = typeof body.description === "string" ? body.description.trim() : "";
@@ -498,12 +582,12 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
       WHERE id=? AND user_id=? AND semester_id=? AND is_active=1`).bind(categoryId, userId, semesterId).first<Record<string, unknown>>();
     if (!current) return json({ error: "Category not found." }, 404);
     if (method === "PATCH" || method === "DELETE") {
-      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId);
+      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId, plan);
       if (writeDenied) return writeDenied;
     }
     if (method === "PATCH") {
       if (Number(current.is_system) === 1) return json({ error: "The default Other category is managed by Attendly and cannot be renamed or remapped." }, 400);
-      if (!(await hasFeature(env, userId, "customCategories"))) return json({ error: "Editing custom categories is a Pro feature." }, 403);
+      if (!(await hasFeature(env, userId, "customCategories", plan))) return json({ error: "Editing custom categories is a Pro feature." }, 403);
       const body = await readJson<{ name?: unknown; description?: unknown; attendanceEffect?: unknown }>(request);
       const name = body.name === undefined ? String(current.name) : typeof body.name === "string" ? body.name.trim() : "";
       const description = body.description === undefined ? String(current.description || "") : typeof body.description === "string" ? body.description.trim() : "";
@@ -526,7 +610,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
       }
     }
     if (method === "DELETE") {
-      if (!(await hasFeature(env, userId, "customCategories"))) return json({ error: "Managing custom categories is a Pro feature." }, 403);
+      if (!(await hasFeature(env, userId, "customCategories", plan))) return json({ error: "Managing custom categories is a Pro feature." }, 403);
       if (Number(current.is_system) === 1) return json({ error: "The default Other category cannot be deleted." }, 400);
       await env.DB.prepare(`UPDATE attendance_categories SET is_active=0,updated_at=CURRENT_TIMESTAMP
         WHERE id=? AND user_id=? AND semester_id=?`).bind(categoryId, userId, semesterId).run();
@@ -545,12 +629,12 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     if (method === "GET") {
       const [unassigned, recoveryAllowed, planningAllowed, subjectAnalytics] = await Promise.all([
         env.DB.prepare("SELECT COUNT(*) AS n FROM attendance WHERE semester_id=? AND subject_id IS NULL").bind(semesterId).first<{ n: number }>(),
-        hasFeature(env, userId, "recoveryCalculator"), hasFeature(env, userId, "attendancePlanning"), hasFeature(env, userId, "subjectAnalytics"),
+        hasFeature(env, userId, "recoveryCalculator", plan), hasFeature(env, userId, "attendancePlanning", plan), hasFeature(env, userId, "subjectAnalytics", plan),
       ]);
       return json({ subjects: await calculateSubjectStats(env, semester, recoveryAllowed, planningAllowed), unassignedEntries: number(unassigned?.n), entitlements: { recoveryCalculator: recoveryAllowed, attendancePlanning: planningAllowed, subjectAnalytics } });
     }
     if (method === "POST") {
-      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId);
+      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId, plan);
       if (writeDenied) return writeDenied;
       const body = await readJson<{ name?: unknown; code?: unknown; targetPercentage?: unknown }>(request);
       const name = body.name;
@@ -577,7 +661,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     const current = await env.DB.prepare("SELECT * FROM subjects WHERE id=? AND semester_id=?").bind(subjectId, semesterId).first<Record<string, unknown>>();
     if (!current) return json({ error: "Subject not found." }, 404);
     if (method === "PATCH" || method === "DELETE") {
-      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId);
+      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId, plan);
       if (writeDenied) return writeDenied;
     }
     if (method === "PATCH") {
@@ -597,13 +681,16 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
       }
     }
     if (method === "DELETE") {
-      // Protect the weekly routine: a subject cannot be physically deleted while
-      // one or more timetable slots still refer to it. The student must reassign
-      // those slots first; this avoids ON DELETE SET NULL silently clearing them.
-      const assigned = await env.DB.prepare(`SELECT COUNT(*) AS count
-        FROM timetable_subjects WHERE semester_id=? AND subject_id=?`)
-        .bind(semesterId, subjectId).first<{ count: number }>();
-      const assignedCount = number(assigned?.count);
+      // Keep both the weekly routine and historical attendance linked to this
+      // subject. The schema uses ON DELETE SET NULL for these references, so a
+      // plain DELETE would silently erase their subject association.
+      const references = await env.DB.prepare(`SELECT
+          (SELECT COUNT(*) FROM timetable_subjects WHERE semester_id=? AND subject_id=?) AS assigned_count,
+          (SELECT COUNT(*) FROM attendance WHERE semester_id=? AND subject_id=?) AS attendance_count`)
+        .bind(semesterId, subjectId, semesterId, subjectId)
+        .first<{ assigned_count: number; attendance_count: number }>();
+      const assignedCount = number(references?.assigned_count);
+      const attendanceCount = number(references?.attendance_count);
       if (assignedCount > 0) {
         return json({
           error: `Cannot delete this subject because it is assigned to ${assignedCount} weekly class slot(s). Reassign those slots in your weekly routine first. Your routine has not been changed.`,
@@ -611,7 +698,26 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
           assignedSlots: assignedCount,
         }, 409);
       }
-      await env.DB.prepare("DELETE FROM subjects WHERE id=? AND semester_id=?").bind(subjectId, semesterId).run();
+      if (attendanceCount > 0) {
+        return json({
+          error: `Cannot delete this subject because ${attendanceCount} historical attendance record(s) use it. Keep the subject so your attendance history and PDF reports retain the correct subject name.`,
+          code: "SUBJECT_HAS_ATTENDANCE_HISTORY",
+          attendanceEntries: attendanceCount,
+        }, 409);
+      }
+      // Re-check both references in the DELETE statement itself to close the
+      // race where an attendance/routine row is inserted after the count query.
+      const deletion = await env.DB.prepare(`DELETE FROM subjects
+        WHERE id=? AND semester_id=?
+          AND NOT EXISTS (SELECT 1 FROM timetable_subjects WHERE semester_id=? AND subject_id=?)
+          AND NOT EXISTS (SELECT 1 FROM attendance WHERE semester_id=? AND subject_id=?)`)
+        .bind(subjectId, semesterId, semesterId, subjectId, semesterId, subjectId).run();
+      if (Number(deletion.meta.changes || 0) !== 1) {
+        return json({
+          error: "This subject has become linked to a weekly routine or attendance record. Refresh the page and review its references before deleting it.",
+          code: "SUBJECT_STILL_REFERENCED",
+        }, 409);
+      }
       return json({ ok: true });
     }
   }
@@ -626,7 +732,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
       return json(rows(result));
     }
     if (method === "PUT") {
-      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId);
+      const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId, plan);
       if (writeDenied) return writeDenied;
       const body = await readJson<{ slots?: { weekday: number; classNumber: number; subjectId: number | null }[] }>(request);
       const slots = body.slots;
@@ -664,7 +770,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
   if (match && method === "POST") {
     const semesterId = Number(match[1]);
     if (!(await getSemester(env, semesterId, userId))) return json({ error: "Semester not found." }, 404);
-    const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId);
+    const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semesterId, plan);
     if (writeDenied) return writeDenied;
     const result = await env.DB.prepare(`UPDATE attendance AS a SET subject_id=(
         SELECT ts.subject_id FROM timetable_subjects ts WHERE ts.semester_id=a.semester_id
@@ -746,7 +852,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     const semester = await getSemester(env, Number(match[1]), userId);
     const date = match[2];
     if (!semester) return json({ error: "Semester not found." }, 404);
-    const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semester.id);
+    const writeDenied = await requireWritableSemester(env, userId, auth.user.role, semester.id, plan);
     if (writeDenied) return writeDenied;
     if (!isDate(date) || date < semester.start_date || date > semester.end_date) return json({ error: "Date must fall within the selected semester." }, 400);
     const timetable = await getTimetable(env, semester.id);
@@ -783,7 +889,7 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
       WHERE a.semester_id=? AND a.attendance_date=? ORDER BY a.class_number`)
       .bind(semester.id, date).all();
     const [stats, recoveryAllowed, planningAllowed] = await Promise.all([
-      calculateStats(env, semester), hasFeature(env, userId, "recoveryCalculator"), hasFeature(env, userId, "attendancePlanning"),
+      calculateStats(env, semester), hasFeature(env, userId, "recoveryCalculator", plan), hasFeature(env, userId, "attendancePlanning", plan),
     ]);
     return json({ date, entries: rows(saved), analytics: { ...stats, recoveryClasses: recoveryAllowed ? stats.recoveryClasses : null, safeAbsences: recoveryAllowed ? stats.safeAbsences : null, remainingScheduled: planningAllowed ? stats.remainingScheduled : null, bestCase: planningAllowed ? stats.bestCase : null } });
   }
@@ -793,9 +899,9 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     const semester = await getSemester(env, Number(match[1]), userId);
     if (!semester) return json({ error: "Semester not found." }, 404);
     const [trendChartsEnabled, recoveryAllowed, planningAllowed, subjectAnalyticsEnabled, customCategoriesEnabled] = await Promise.all([
-      hasFeature(env, userId, "trendCharts"), hasFeature(env, userId, "recoveryCalculator"),
-      hasFeature(env, userId, "attendancePlanning"), hasFeature(env, userId, "subjectAnalytics"),
-      hasFeature(env, userId, "customCategories"),
+      hasFeature(env, userId, "trendCharts", plan), hasFeature(env, userId, "recoveryCalculator", plan),
+      hasFeature(env, userId, "attendancePlanning", plan), hasFeature(env, userId, "subjectAnalytics", plan),
+      hasFeature(env, userId, "customCategories", plan),
     ]);
     const [stats, monthlyResult, subjects, unassigned] = await Promise.all([
       calculateStats(env, semester),
@@ -841,32 +947,13 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     });
   }
 
-  match = path.match(/^\/api\/reports\/(\d+)\.(csv|json)$/);
+  match = path.match(/^\/api\/reports\/(\d+)\.json$/);
   if (match && method === "GET") {
     const semester = await getSemester(env, Number(match[1]), userId);
     if (!semester) return json({ error: "Semester not found." }, 404);
-    if (!(await hasFeature(env, userId, "pdfCsvExport"))) return json({ error: "PDF and CSV exports are included in the Pro plan. Upgrade to export your records." }, 403);
-    if (match[2] === "csv") {
-      const result = await env.DB.prepare(`SELECT a.attendance_date,a.class_number,
-          CASE WHEN a.category_id IS NOT NULL THEN 'OTHER' ELSE a.status END AS status,
-          COALESCE(c.name,CASE a.status WHEN 'PRESENT' THEN 'Present' WHEN 'ABSENT' THEN 'Absent' WHEN 'HOLIDAY' THEN 'Holiday' ELSE 'Other' END) AS category,
-          COALESCE(s.name,'Unassigned') AS subject,
-          CASE
-            WHEN a.status='HOLIDAY' THEN 'HOLIDAY'
-            WHEN a.category_id IS NOT NULL THEN CASE COALESCE(c.attendance_effect,'EXCLUDE') WHEN 'PRESENT' THEN 'PRESENT' WHEN 'ABSENT' THEN 'ABSENT' ELSE 'HOLIDAY' END
-            WHEN a.status='PRESENT' THEN 'PRESENT'
-            WHEN a.status='ABSENT' THEN 'ABSENT'
-            WHEN a.status IN ('OTHER','MASS_BUNK') THEN CASE COALESCE(c.attendance_effect,CASE WHEN a.status='MASS_BUNK' AND s0.mass_bunk_policy='ABSENT' THEN 'ABSENT' ELSE 'EXCLUDE' END) WHEN 'PRESENT' THEN 'PRESENT' WHEN 'ABSENT' THEN 'ABSENT' ELSE 'HOLIDAY' END
-            ELSE 'HOLIDAY'
-          END AS calculation
-        FROM attendance a JOIN semesters s0 ON s0.id=a.semester_id LEFT JOIN subjects s ON s.id=a.subject_id LEFT JOIN attendance_categories c ON c.id=a.category_id
-        WHERE a.semester_id=? ORDER BY a.attendance_date,a.class_number`)
-        .bind(semester.id).all<Record<string, unknown>>();
-      const content = ["Date,Class,Subject,Status,Category,Calculation", ...rows(result).map((item) => [item.attendance_date, item.class_number, item.subject, item.status, item.category, item.calculation].map(csvCell).join(","))].join("\r\n");
-      return new Response(`\uFEFF${content}`, { headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="attendance-${semester.id}.csv"`, "cache-control": "no-store" } });
-    }
+    if (!(await hasFeature(env, userId, "pdfCsvExport", plan))) return json({ error: "PDF attendance reports are included in the Pro plan. Upgrade to export your records." }, 403);
     const [recoveryAllowed, planningAllowed] = await Promise.all([
-      hasFeature(env, userId, "recoveryCalculator"), hasFeature(env, userId, "attendancePlanning"),
+      hasFeature(env, userId, "recoveryCalculator", plan), hasFeature(env, userId, "attendancePlanning", plan),
     ]);
     const [entryResult, stats, subjects] = await Promise.all([
       env.DB.prepare(`SELECT a.attendance_date,a.class_number,a.status,a.subject_id,s.name AS subject_name,s.code AS subject_code,
@@ -888,97 +975,6 @@ export async function handleAcademic(request: Request, env: Env, auth: AuthConte
     return json({ semester: { id: semester.id, name: semester.name, startDate: semester.start_date, endDate: semester.end_date, targetPercentage: semester.target_percentage }, stats: { ...stats, recoveryClasses: recoveryAllowed ? stats.recoveryClasses : null, safeAbsences: recoveryAllowed ? stats.safeAbsences : null, remainingScheduled: planningAllowed ? stats.remainingScheduled : null, bestCase: planningAllowed ? stats.bestCase : null }, subjects, entries: rows(entryResult) });
   }
 
-  if (path === "/api/backup" && method === "GET") {
-    const [semesters, timetable, subjects, subjectTimetable, categories, attendance] = await Promise.all([
-      env.DB.prepare("SELECT * FROM semesters WHERE user_id=? ORDER BY id").bind(userId).all(),
-      env.DB.prepare("SELECT t.* FROM timetable t JOIN semesters s ON s.id=t.semester_id WHERE s.user_id=? ORDER BY t.id").bind(userId).all(),
-      env.DB.prepare("SELECT sub.* FROM subjects sub JOIN semesters s ON s.id=sub.semester_id WHERE s.user_id=? ORDER BY sub.id").bind(userId).all(),
-      env.DB.prepare("SELECT ts.* FROM timetable_subjects ts JOIN semesters s ON s.id=ts.semester_id WHERE s.user_id=? ORDER BY ts.id").bind(userId).all(),
-      env.DB.prepare("SELECT c.* FROM attendance_categories c WHERE c.user_id=? ORDER BY c.id").bind(userId).all(),
-      env.DB.prepare("SELECT a.* FROM attendance a JOIN semesters s ON s.id=a.semester_id WHERE s.user_id=? ORDER BY a.attendance_date,a.class_number").bind(userId).all(),
-    ]);
-    return json({ version: 3, exportedAt: new Date().toISOString(), semesters: rows(semesters), timetable: rows(timetable), subjects: rows(subjects), subjectTimetable: rows(subjectTimetable), categories: rows(categories), attendance: rows(attendance) }, 200, { "content-disposition": "attachment; filename=\"attendance-backup.json\"" });
-  }
-
-  if (path === "/api/backup/restore" && method === "POST") {
-    const data = await readJson<Record<string, any>>(request);
-    if (!data || ![1, 2, 3].includes(data.version) || !Array.isArray(data.semesters) || !Array.isArray(data.timetable) || !Array.isArray(data.attendance)) return json({ error: "This backup file is not supported." }, 400);
-    if (data.semesters.length > 100 || data.attendance.length > 10000 || data.timetable.length > 700 || (data.subjects?.length ?? 0) > 3000 || (data.subjectTimetable?.length ?? 0) > 3500) return json({ error: "Backup exceeds safe import limits (maximum 10,000 attendance entries)." }, 400);
-    const multiSemesterAllowed = await isMultiSemesterAllowed(env, userId, auth.user.role);
-    if (!multiSemesterAllowed) {
-      const existingCount = await env.DB.prepare("SELECT COUNT(*) AS total FROM semesters WHERE user_id=?").bind(userId).first<{ total: number }>();
-      if (Number(existingCount?.total || 0) > 1 || data.semesters.length > 1) {
-        return json({ error: "Restoring a backup that replaces multiple semesters requires Pro. Your existing semesters remain safe and unchanged." }, 403);
-      }
-      if (Number(existingCount?.total || 0) === 1) {
-        const activeId = await getFreeActiveSemesterId(env, userId);
-        const existingActive = await env.DB.prepare("SELECT id FROM semesters WHERE id=? AND user_id=?").bind(activeId, userId).first<{ id: number }>();
-        if (!existingActive) return json({ error: "Select your Free working semester before restoring a backup." }, 409);
-      }
-    }
-    const statements: D1PreparedStatement[] = [env.DB.prepare("DELETE FROM semesters WHERE user_id=?").bind(userId)];
-    const semesterIdMap = new Map<number, number>();
-    const subjectIdMap = new Map<number, number>();
-    const categoryIdMap = new Map<number, number>();
-    let generatedId = -(Date.now() * 1000);
-    for (const semester of data.semesters) {
-      if (!Number.isInteger(semester.id) || !semester.id || typeof semester.name !== "string" || !isDate(semester.start_date) || !isDate(semester.end_date) || semester.start_date > semester.end_date || !Number.isFinite(semester.target_percentage) || semester.target_percentage < 1 || semester.target_percentage > 100 || !["ABSENT", "EXCLUDE"].includes(semester.mass_bunk_policy)) return json({ error: "Invalid semester data in backup." }, 400);
-      const newId = generatedId--;
-      semesterIdMap.set(semester.id, newId);
-      statements.push(env.DB.prepare(`INSERT INTO semesters(id,user_id,name,start_date,end_date,target_percentage,mass_bunk_policy,created_at)
-        VALUES(?,?,?,?,?,?,?,?)`).bind(newId, userId, semester.name, semester.start_date, semester.end_date, semester.target_percentage, semester.mass_bunk_policy, semester.created_at ?? new Date().toISOString()));
-    }
-    for (const item of data.timetable) {
-      const newSemesterId = semesterIdMap.get(item.semester_id);
-      if (!newSemesterId || !Number.isInteger(item.weekday) || item.weekday < 0 || item.weekday > 6 || !Number.isInteger(item.class_count) || item.class_count < 0 || item.class_count > 5) return json({ error: "Invalid timetable data in backup." }, 400);
-      statements.push(env.DB.prepare("INSERT INTO timetable(semester_id,weekday,class_count) VALUES(?,?,?)").bind(newSemesterId, item.weekday, item.class_count));
-    }
-    for (const item of data.subjects || []) {
-      const newSemesterId = semesterIdMap.get(item.semester_id);
-      if (!newSemesterId || typeof item.name !== "string" || item.name.trim().length < 2 || (item.target_percentage !== null && item.target_percentage !== undefined && (!Number.isFinite(item.target_percentage) || item.target_percentage < 1 || item.target_percentage > 100))) return json({ error: "Invalid subject data in backup." }, 400);
-      const newId = generatedId--;
-      subjectIdMap.set(item.id, newId);
-      statements.push(env.DB.prepare("INSERT INTO subjects(id,semester_id,name,code,target_percentage,created_at) VALUES(?,?,?,?,?,?)")
-        .bind(newId, newSemesterId, item.name, item.code ?? null, item.target_percentage ?? null, item.created_at ?? new Date().toISOString()));
-    }
-    for (const item of data.categories || []) {
-      const newSemesterId = semesterIdMap.get(item.semester_id);
-      if (!newSemesterId || typeof item.name !== "string" || !["PRESENT", "ABSENT", "EXCLUDE"].includes(item.attendance_effect)) return json({ error: "Invalid attendance category data in backup." }, 400);
-      const newId = generatedId--;
-      categoryIdMap.set(item.id, newId);
-      statements.push(env.DB.prepare(`INSERT INTO attendance_categories(id,user_id,semester_id,name,description,attendance_effect,is_system,is_active,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(newId, userId, newSemesterId, item.name, item.description ?? null, item.attendance_effect, item.is_system ? 1 : 0, item.is_active === 0 ? 0 : 1, item.created_at ?? new Date().toISOString(), item.updated_at ?? new Date().toISOString()));
-    }
-    for (const item of data.subjectTimetable || []) {
-      const newSemesterId = semesterIdMap.get(item.semester_id), newSubjectId = subjectIdMap.get(item.subject_id);
-      if (!newSemesterId || !newSubjectId || !Number.isInteger(item.weekday) || item.weekday < 0 || item.weekday > 6 || !Number.isInteger(item.class_number) || item.class_number < 1 || item.class_number > 5) return json({ error: "Invalid subject timetable data in backup." }, 400);
-      statements.push(env.DB.prepare("INSERT INTO timetable_subjects(semester_id,weekday,class_number,subject_id) VALUES(?,?,?,?)")
-        .bind(newSemesterId, item.weekday, item.class_number, newSubjectId));
-    }
-    for (const item of data.attendance) {
-      const newSemesterId = semesterIdMap.get(item.semester_id);
-      const newSubjectId = item.subject_id == null ? null : (subjectIdMap.get(item.subject_id) ?? null);
-      const newCategoryId = item.category_id == null ? null : (categoryIdMap.get(item.category_id) ?? null);
-      const status = item.status === "MASS_BUNK" ? "OTHER" : item.status;
-      if (!newSemesterId || !isDate(item.attendance_date) || !Number.isInteger(item.class_number) || item.class_number < 1 || item.class_number > 5 || !STATUSES.includes(status)) return json({ error: "Invalid attendance data in backup." }, 400);
-      statements.push(env.DB.prepare(`INSERT INTO attendance(semester_id,attendance_date,class_number,status,subject_id,category_id,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?)`).bind(newSemesterId, item.attendance_date, item.class_number, status, newSubjectId, newCategoryId, item.created_at ?? new Date().toISOString(), item.updated_at ?? new Date().toISOString()));
-    }
-    try {
-      // Include the Free-workspace preference in the same D1 batch as the
-      // restore, so the replacement semesters and selected workspace commit
-      // atomically rather than leaving a partially successful restore.
-      const restoredActiveId = data.semesters.length ? semesterIdMap.get(data.semesters[0].id) ?? null : null;
-      statements.push(env.DB.prepare(`INSERT INTO user_semester_preferences(user_id,free_active_semester_id)
-        VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET
-          free_active_semester_id=excluded.free_active_semester_id,updated_at=CURRENT_TIMESTAMP`)
-        .bind(userId, restoredActiveId));
-      await env.DB.batch(statements);
-      return json({ ok: true, message: "Your backup was restored successfully." });
-    } catch (error) {
-      return json({ error: `Restore failed; no changes were committed. ${String(error).slice(0, 240)}` }, 400);
-    }
-  }
 
   return null;
 }

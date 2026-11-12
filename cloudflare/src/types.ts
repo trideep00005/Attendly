@@ -49,3 +49,19 @@ export interface AttendanceRow {
   created_at: string;
   updated_at: string;
 }
+
+
+/** One request-scoped entitlement snapshot, resolved once after authentication. */
+export interface EffectivePlanSnapshot {
+  subscription_id: number | null;
+  status: string;
+  starts_at: string | null;
+  expires_at: string | null;
+  amount_paid_inr: number;
+  plan_id: number;
+  plan_code: string;
+  plan_name: string;
+  tier: "FREE" | "PRO";
+  features_json: string;
+  duration_days: number | null;
+}

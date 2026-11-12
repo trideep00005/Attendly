@@ -2,7 +2,7 @@ import type { Env } from "./types";
 import { HttpError, json, readJson, validateOrigin } from "./lib/http";
 import { handleAuth, authenticate } from "./modules/auth";
 import { handleAcademic } from "./modules/academic";
-import { handleSubscriptions, refreshSubscriptionStates } from "./modules/subscriptions";
+import { getEffectivePlan, handleSubscriptions, refreshSubscriptionStates } from "./modules/subscriptions";
 import { handleAdmin } from "./modules/admin";
 import { handleAdminBootstrap } from "./modules/admin-bootstrap";
 import { handleLegal } from "./modules/legal";
@@ -100,6 +100,14 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
     const auth = await authenticate(request, env);
     if (!auth) return json({ error: "Please log in to continue." }, 401);
 
+    // Resolve the current user's plan once per authenticated request. Academic
+    // feature checks reuse this immutable snapshot instead of triggering global
+    // subscription UPDATE batches for every individual feature check.
+    const requestAuth = {
+      ...auth,
+      plan: auth.user.role === "STUDENT" ? await getEffectivePlan(env, auth.user.id) : null,
+    };
+
     const legalResponse = await handleLegal(request, env, auth.user.id);
     if (legalResponse) return legalResponse;
 
@@ -121,13 +129,13 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
       if (!adminAllowed) return json({ error: "Administrator request limit reached. Please slow down." }, 429, { "retry-after": "60" });
     }
 
-    const subscriptionResponse = await handleSubscriptions(request, env, auth);
+    const subscriptionResponse = await handleSubscriptions(request, env, requestAuth);
     if (subscriptionResponse) return subscriptionResponse;
 
-    const adminResponse = await handleAdmin(request, env, auth);
+    const adminResponse = await handleAdmin(request, env, requestAuth);
     if (adminResponse) return adminResponse;
 
-    const academicResponse = await handleAcademic(request, env, auth);
+    const academicResponse = await handleAcademic(request, env, requestAuth);
     if (academicResponse) return academicResponse;
 
     return json({ error: "API endpoint not found." }, 404);

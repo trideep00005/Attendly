@@ -1,15 +1,8 @@
 import * as attendanceRepository from '../repositories/attendance.repository.js';
 import { getOwnedSemester } from './semester.service.js';
 import { getSemesterStats, getSubjectStats } from './analytics.service.js';
-import { csvCell } from '../utils/csv.util.js';
-import { validateBackup } from '../validators/backup.validator.js';
 
-export function createCsvReport(semesterId: number, userId: number): string {
-  getOwnedSemester(semesterId, userId);
-  const rows = attendanceRepository.listAttendanceForCsv(semesterId);
-  return ['Date,Class,Subject,Status', ...rows.map((row) => [row.attendance_date, row.class_number, row.subject, row.status].map(csvCell).join(','))].join('\r\n');
-}
-
+/** Data payload used only by the authenticated client-side PDF report generator. */
 export function createJsonReport(semesterId: number, userId: number) {
   const semester = getOwnedSemester(semesterId, userId);
   return {
@@ -19,13 +12,3 @@ export function createJsonReport(semesterId: number, userId: number) {
     entries: attendanceRepository.listAttendanceForJson(semesterId),
   };
 }
-
-export function createUserBackup(userId: number) {
-  return attendanceRepository.listUserBackupData(userId);
-}
-
-export function restoreUserBackup(userId: number, data: unknown): void {
-  const backup = validateBackup(data);
-  attendanceRepository.restoreUserBackup(userId, backup);
-}
-

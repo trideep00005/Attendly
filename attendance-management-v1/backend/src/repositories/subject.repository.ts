@@ -29,8 +29,18 @@ export function countSubjectTimetableAssignments(subjectId: number, semesterId: 
   return Number(row?.count ?? 0);
 }
 
+export function countSubjectAttendanceRecords(subjectId: number, semesterId: number): number {
+  const row = db.prepare('SELECT COUNT(*) AS count FROM attendance WHERE semester_id=? AND subject_id=?')
+    .get(semesterId, subjectId) as { count: number } | undefined;
+  return Number(row?.count ?? 0);
+}
+
 export function deleteSubject(subjectId: number, semesterId: number): number {
-  return db.prepare('DELETE FROM subjects WHERE id=? AND semester_id=?').run(subjectId, semesterId).changes;
+  // Atomic reference checks prevent ON DELETE SET NULL from erasing historical links.
+  return db.prepare(`DELETE FROM subjects WHERE id=? AND semester_id=?
+    AND NOT EXISTS (SELECT 1 FROM timetable_subjects WHERE semester_id=? AND subject_id=?)
+    AND NOT EXISTS (SELECT 1 FROM attendance WHERE semester_id=? AND subject_id=?)`)
+    .run(subjectId, semesterId, semesterId, subjectId, semesterId, subjectId).changes;
 }
 
 export function listSubjectTimetable(semesterId: number): unknown[] {

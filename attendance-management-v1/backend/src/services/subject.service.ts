@@ -47,7 +47,16 @@ export function deleteSemesterSubject(semesterId: number, subjectId: number, use
       409,
     );
   }
-  if (!subjectRepository.deleteSubject(subjectId, semesterId)) throw new AppError('Subject not found.', 404);
+  const attendanceEntries = subjectRepository.countSubjectAttendanceRecords(subjectId, semesterId);
+  if (attendanceEntries > 0) {
+    throw new AppError(
+      `Cannot delete "${current.name}" because ${attendanceEntries} historical attendance record(s) use it. Keep the subject so attendance history and PDF reports retain the correct subject name.`,
+      409,
+    );
+  }
+  if (!subjectRepository.deleteSubject(subjectId, semesterId)) {
+    throw new AppError('This subject became linked to a routine or attendance record. Refresh and review its references before deleting it.', 409);
+  }
 }
 
 export function getSemesterSubjectTimetable(semesterId: number, userId: number) {

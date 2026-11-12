@@ -2,12 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Activity, AlertCircle, ArrowDownToLine, ArrowLeft, ArrowRight, BookOpen, CalendarDays,
   Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3,
-  CloudDownload, GraduationCap, LayoutDashboard, LogOut, Menu, Plus, Settings, ShieldCheck,
+  GraduationCap, LayoutDashboard, LogOut, Menu, Plus, Settings, ShieldCheck,
   Sparkles, Target, Trash2, TrendingUp, UserRound, X, Pencil, CreditCard, Shield, Tags,
   FileText, UserPlus, type LucideIcon
 } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis, BarChart, Bar } from 'recharts';
-import { api, downloadFile } from './services/api';
+import { api } from './services/api';
 import { jsPDF } from 'jspdf';
 import { AdminPage, SubscriptionPage } from './pages/SaasPages';
 import autoTable from 'jspdf-autotable';
@@ -25,7 +25,7 @@ type PlatformStatus = {
   maintenanceType?:string;
   emailVerificationRequired?:boolean;
 };
-type Semester = { id:number; name:string; start_date:string; end_date:string; target_percentage:number; percentage:number; present:number; total:number; canEdit?:boolean; isFreeActive?:boolean; freeActiveSemesterId?:number|null; accessMode?:'FREE'|'PRO'; canCreateSemester?:boolean; semesterCount?:number; semesterLimit?:number|null; recoveryClasses?:number|null; safeAbsences?:number|null; remainingScheduled?:number|null; bestCase?:number|null; entitlements?:{recoveryCalculator?:boolean;attendancePlanning?:boolean;subjectAnalytics?:boolean;customCategories?:boolean} };
+type Semester = { id:number; name:string; start_date:string; end_date:string; target_percentage:number; percentage:number; present:number; total:number; canEdit?:boolean; isFreeActive?:boolean; freeActiveSemesterId?:number|null; accessMode?:'FREE'|'PRO'; canCreateSemester?:boolean; canChooseFreeSemester?:boolean; freeSelectionUsed?:boolean; semesterCount?:number; semesterLimit?:number|null; recoveryClasses?:number|null; safeAbsences?:number|null; remainingScheduled?:number|null; bestCase?:number|null; entitlements?:{recoveryCalculator?:boolean;attendancePlanning?:boolean;subjectAnalytics?:boolean;customCategories?:boolean} };
 type Stats = { present:number; absent:number; missed:number; pendingPast:number; pendingClasses:number; holiday:number; other:number; excluded:number; total:number; totalClassesHeld:number; percentage:number; target:number; recoveryClasses:number|null; safeAbsences:number|null; remainingScheduled:number|null; bestCase:number|null; recordedSlots:number; recordedDays:number; collegeOpenDays:number; presentDays:number };
 type CalendarDay = { date:string; inSemester:boolean; classCount:number; entries:Record<number,Status>; categoryIds?:Record<number,number|null>; categoryNames?:Record<number,string|null>; categoryEffects?:Record<number,string|null>; subjectByClass?:Record<number,{id:number;name:string;code:string|null}>; recorded:number };
 type SubjectStats = { id:number; name:string; code:string|null; target_percentage:number|null; targetPercentage:number; present:number; absent:number; holiday:number; other:number; excluded:number; total:number; percentage:number; recoveryClasses:number|null; safeAbsences:number|null; remainingScheduled:number|null; bestCase:number|null };
@@ -40,7 +40,7 @@ const todayISO = () => { const d=new Date(); return `${d.getFullYear()}-${String
 const initialMonth = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; };
 const initials = (s:string) => s.split(/\s+/).map(x=>x[0]).join('').slice(0,2).toUpperCase();
 
-const APP_PAGES = ['Dashboard','Calendar','Analytics','Semesters','Subjects','Attendance Categories','Reports & Backup','Settings','Subscription','Legal & Privacy','Administration','More','Install Attendly'];
+const APP_PAGES = ['Dashboard','Calendar','Analytics','Semesters','Subjects','Attendance Categories','Reports','Settings','Subscription','Legal & Privacy','Administration','More','Install Attendly'];
 const pageSlug = (name:string) => name.toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
 const pageHash = (name:string) => `#/${pageSlug(name)}`;
 const pageFromHash = () => {
@@ -48,6 +48,7 @@ const pageFromHash = () => {
   const rawSlug = window.location.hash.replace(/^#\/?/, '');
   let slug = rawSlug;
   try { slug = decodeURIComponent(rawSlug); } catch { /* Invalid URL fragments safely fall back to Dashboard. */ }
+  if (slug.toLowerCase() === 'reports-and-backup') return 'Reports';
   return APP_PAGES.find(name => pageSlug(name) === slug.toLowerCase()) ?? 'Dashboard';
 };
 
@@ -167,7 +168,7 @@ function App(){
     return ()=>{active=false;};
   },[boot,user,platformStatus?.maintenanceEnabled,loadSemesters]);
   const activeSemester=semesters.find(s=>s.id===semesterId)??null;
-  const chooseFreeActiveSemester=async(id:number)=>{try{await api('/semesters/free-active',{method:'PUT',body:JSON.stringify({semesterId:id})});await loadSemesters();setSemesterId(id);notify('Your Free working semester has been updated. Other semesters remain available in read-only mode.');}catch(e:any){notify(e.message,'error');}};
+  const chooseFreeActiveSemester=async(id:number)=>{try{await api('/semesters/free-active',{method:'PUT',body:JSON.stringify({semesterId:id})});await loadSemesters();setSemesterId(id);notify('Your one-time Free working semester choice is saved. Other semesters remain view-only until you renew Pro.');}catch(e:any){notify(e.message,'error');}};
   const logout=async()=>{try{await api('/auth/logout',{method:'POST'});}finally{setUser('');setRole('STUDENT');setSemesters([]);setSemesterId(null);replacePage('Dashboard');}};
   const acknowledgeSuspension=async()=>{
     if(suspensionSigningOut)return;
@@ -183,7 +184,7 @@ function App(){
     {name:'Dashboard',icon:LayoutDashboard,section:'WORKSPACE'},{name:'Calendar',icon:CalendarDays,section:'WORKSPACE'},
     {name:'Analytics',icon:TrendingUp,section:'WORKSPACE'},{name:'Semesters',icon:GraduationCap,section:'MANAGE'},
     {name:'Subjects',icon:BookOpen,section:'MANAGE'},{name:'Attendance Categories',icon:Tags,section:'MANAGE'},
-    {name:'Reports & Backup',icon:CloudDownload,section:'MANAGE'},{name:'Settings',icon:Settings,section:'MANAGE'},
+    {name:'Reports',icon:FileText,section:'MANAGE'},{name:'Settings',icon:Settings,section:'MANAGE'},
     {name:'Subscription',icon:CreditCard,section:'ACCOUNT'},{name:'Legal & Privacy',icon:FileText,section:'ACCOUNT'}
   ];
   if(role!=='STUDENT') nav.push({name:'Administration',icon:Shield,section:'ADMIN'});
@@ -202,7 +203,7 @@ function App(){
     <main className="main-area">
       <header className="topbar"><div className="top-left"><div className="breadcrumb">Workspace <ChevronRight size={14}/> <strong>{page}</strong></div></div><div className="top-right"><div className="semester-select-wrap"><GraduationCap size={16}/><select aria-label="Select semester" value={semesterId??''} onChange={e=>setSemesterId(e.target.value?Number(e.target.value):null)}><option value="">Select semester</option>{semesters.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select><ChevronDown size={14}/></div><div className="today-pill"><span className="live-dot"/>{new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'})}</div></div></header>
       <div className="page-container">
-        {activeSemester?.canEdit===false && ['Dashboard','Calendar','Analytics','Subjects','Attendance Categories','Settings','Reports & Backup'].includes(page) && <div className="semester-access-banner"><div><strong>Read-only semester</strong><span>Pro access has expired. You can view this semester, but editing is available only in your selected Free working semester.</span></div><button className="btn btn-secondary btn-small" onClick={()=>navigatePage('Semesters')}>Choose semester</button><button className="btn btn-primary btn-small" onClick={()=>navigatePage('Subscription')}>Upgrade to Pro</button></div>}
+        {activeSemester?.canEdit===false && ['Dashboard','Calendar','Analytics','Subjects','Attendance Categories','Settings','Reports'].includes(page) && <div className="semester-access-banner"><div><strong>Read-only semester</strong><span>Pro access has expired. You can view this semester, but editing is available only in your selected Free working semester.</span></div><button className="btn btn-secondary btn-small" onClick={()=>navigatePage('Semesters')}>Choose semester</button><button className="btn btn-primary btn-small" onClick={()=>navigatePage('Subscription')}>Upgrade to Pro</button></div>}
         {page==='Dashboard'&&<Dashboard {...contentProps} onNavigate={navigatePage}/>}
         {page==='Calendar'&&<CalendarPage {...contentProps}/>}
         {page==='Analytics'&&<AnalyticsPage {...contentProps} onNavigate={navigatePage}/> }
@@ -210,7 +211,7 @@ function App(){
         {page==='Attendance Categories'&&<CategoriesPage {...contentProps} onNavigate={navigatePage}/>}
         {page==='Semesters'&&<SemestersPage {...contentProps} onNavigate={navigatePage}/>}
         {page==='Settings'&&<SettingsPage {...contentProps}/>}
-        {page==='Reports & Backup'&&<ReportsPage {...contentProps} notify={notify}/>}
+        {page==='Reports'&&<ReportsPage {...contentProps} notify={notify}/>}
         {page==='Subscription'&&<SubscriptionPage notify={notify}/>}{page==='Legal & Privacy'&&<LegalPage notify={notify}/>}
         {page==='Administration'&&role!=='STUDENT'&&<AdminPage notify={notify} role={role}/>}
         {page==='More'&&<MorePage nav={nav} user={user} onNavigate={navigatePage} onLogout={logout} isInstalled={pwaInstalled}/>}
@@ -239,8 +240,8 @@ function SuspensionNoticeModal({reason,busy,onAcknowledge}:{reason:string;busy:b
       <div className="suspension-modal-icon"><Shield size={24}/></div>
       <div className="eyebrow">ATTENDLY ACCOUNT NOTICE</div>
       <h2 id="suspension-title">Your account is suspended</h2>
-      <p className="suspension-modal-intro"> Your Account  is temporarily suspended. The reason is shown below.</p>
-      <div className="suspension-reason-box"><strong>Reason from Attendly</strong><p id="suspension-reason">{reason}</p></div>
+      <p className="suspension-modal-intro">An administrator has temporarily suspended access to this account. The reason is shown below.</p>
+      <div className="suspension-reason-box"><strong>Reason from Attendly Admin</strong><p id="suspension-reason">{reason}</p></div>
       <p className="suspension-modal-help">You will be signed out after acknowledging this notice. Contact Attendly support if you need clarification.</p>
       <button type="button" className="btn btn-primary full" onClick={onAcknowledge} disabled={busy}>{busy?'Signing out…':'Understood · Sign out'} <LogOut size={16}/></button>
     </section>
@@ -397,7 +398,7 @@ function Dashboard({semester,semesters,onCreate,onNavigate}:any){
       <div className="dashboard-grid"><section className="panel attendance-panel"><div className="panel-header"><div><div className="panel-kicker">ATTENDANCE HEALTH</div><h3>Semester performance</h3></div><span className={`status-chip ${good?'positive':'warning'}`}><span/>{good?'Above target':'Below target'}</span></div><div className="performance-content"><ProgressRing value={s.percentage} target={s.target}/><div className="performance-details"><div className="performance-row"><span><i className="dot green-dot"/>Attended</span><strong>{s.present}</strong></div><div className="performance-row"><span><i className="dot red-dot"/>Absent</span><strong>{s.absent}</strong></div><div className="performance-row"><span><i className="dot" style={{background:'#8b5cf6'}}/>Other mapped to Holiday</span><strong>{s.excluded}</strong></div><div className="performance-row"><span><i className="dot" style={{background:'#d97706'}}/>Pending</span><strong>{s.pendingClasses}</strong></div><div className="performance-row"><span><i className="dot" style={{background:'#a78bfa'}}/>All holiday slots</span><strong>{s.holiday}</strong></div><div className="target-line"><div><span>Progress to target</span><strong>{Math.min(100,s.percentage/Math.max(1,s.target)*100).toFixed(0)}%</strong></div><div className="progress-track"><span style={{width:`${Math.min(100,s.percentage/Math.max(1,s.target)*100)}%`}}/></div></div></div></div></section>
         <section className="panel insight-panel"><div className="panel-header"><div><div className="panel-kicker">SMART INSIGHTS</div><h3>Your attendance outlook</h3></div><div className="insight-spark"><Sparkles size={16}/></div></div>{data?.entitlements?.recoveryCalculator?<><div className={`insight-main ${good?'insight-main-positive':'insight-main-recovery'}`}><div className="insight-number">{s.total===0?'—':good?(s.safeAbsences??0):(s.recoveryClasses??'—')}<small>{good?'classes you can miss':'classes to attend'}</small></div><div><strong>{good?'Attendance buffer':'Recovery classes needed'}</strong><p>{s.total===0?'Record your first classes to calculate your attendance outlook.':good?(s.safeAbsences===0?'You are at the target boundary. Attend upcoming classes to build a buffer.':`You can miss up to ${s.safeAbsences} more countable ${s.safeAbsences===1?'class':'classes'} and remain at or above ${s.target}%.`):s.recoveryClasses===null?'A 100% target cannot be recovered after a countable absence.':`Attend the next ${s.recoveryClasses??'required'} consecutive classes without another absence to reach ${s.target}%.`}{s.pendingPast>0?` ${s.pendingPast} past class slots are still unmarked, so this estimate may change.`:''}</p></div></div>{data?.entitlements?.attendancePlanning&&<><div className="insight-divider"/><div className="insight-stat"><span>Classes left on timetable</span><strong>{s.remainingScheduled??'—'}</strong></div><div className="insight-stat"><span>Best-case semester finish</span><strong className={(s.bestCase??0)>=s.target?'text-green':'text-orange'}>{s.bestCase===null?'—':`${s.bestCase.toFixed(1)}%`}</strong></div></>}</>:<div className="upgrade-inline"><strong>Unlock attendance planning tools</strong><p>Pro includes safe absence and recovery calculations.</p><button className="btn btn-secondary btn-small" onClick={()=>onNavigate('Subscription')}>Explore Pro plans <ArrowRight size={14}/></button></div>}</section></div>
       <section className="panel chart-panel"><div className="panel-header"><div><div className="panel-kicker">MONTHLY BREAKDOWN</div><h3>Attendance trend</h3><p className="panel-subtitle">Based on attendance entries recorded in each month.</p></div><button className="text-button" onClick={()=>onNavigate('Analytics')}>View analytics <ArrowRight size={15}/></button></div>{monthly.length?<div className="chart-box"><ResponsiveContainer width="100%" height="100%"><AreaChart data={monthly} margin={{top:14,right:10,left:-18,bottom:0}}><defs><linearGradient id="attendanceGradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#5278eb" stopOpacity={0.2}/><stop offset="95%" stopColor="#5278eb" stopOpacity={0.01}/></linearGradient></defs><CartesianGrid strokeDasharray="3 5" vertical={false} stroke="#edf0f5"/><XAxis dataKey="month" tickFormatter={(v)=>new Date(v+'-01T12:00:00').toLocaleDateString('en-IN',{month:'short'})} tickLine={false} axisLine={false} tick={{fill:'#8992a4',fontSize:13}}/><YAxis domain={[0,100]} tickLine={false} axisLine={false} tick={{fill:'#8992a4',fontSize:12}} tickFormatter={v=>`${v}%`}/><Tooltip formatter={(v:any)=>[`${v}%`,'Attendance']} labelFormatter={v=>new Date(String(v)+'-01T12:00:00').toLocaleDateString('en-IN',{month:'long',year:'numeric'})}/><Area type="monotone" dataKey="percentage" stroke="#5278eb" strokeWidth={2.5} fill="url(#attendanceGradient)" activeDot={{r:5}}/></AreaChart></ResponsiveContainer></div>:<div className="chart-empty"><TrendingUp size={24}/><span>{data?.entitlements?.trendCharts===false?'Monthly trend charts are included in Attendly Pro.':'Monthly trends will appear after you record attendance.'}</span></div>}</section>
-      <div className="bottom-grid"><section className="panel quick-panel"><div className="panel-header"><div><div className="panel-kicker">QUICK ACTIONS</div><h3>Stay organised</h3></div></div><button className="quick-action" onClick={()=>onNavigate('Calendar')}><span className="quick-icon blue"><CalendarDays size={18}/></span><span><strong>Mark today's attendance</strong><small>Update today’s scheduled classes</small></span><ChevronRight size={17}/></button><button className="quick-action" onClick={()=>onNavigate('Semesters')}><span className="quick-icon violet"><GraduationCap size={18}/></span><span><strong>Manage semesters</strong><small>Dates, targets and schedules</small></span><ChevronRight size={17}/></button><button className="quick-action" onClick={()=>onNavigate('Reports & Backup')}><span className="quick-icon green"><ArrowDownToLine size={18}/></span><span><strong>Export your records</strong><small>Download CSV or backup</small></span><ChevronRight size={17}/></button></section><section className="panel note-panel"><div className="note-icon"><CircleHelp size={19}/></div><div><h3>How is attendance calculated?</h3><p>Classes mapped to Present ÷ countable classes × 100. Standard Holiday entries and Other categories mapped to Holiday are left out. Other categories mapped to Present or Absent are included in those totals. Unmarked classes remain pending.</p><button className="text-button" onClick={()=>onNavigate('Settings')}>Review attendance rules <ArrowRight size={14}/></button></div></section></div>
+      <div className="bottom-grid"><section className="panel quick-panel"><div className="panel-header"><div><div className="panel-kicker">QUICK ACTIONS</div><h3>Stay organised</h3></div></div><button className="quick-action" onClick={()=>onNavigate('Calendar')}><span className="quick-icon blue"><CalendarDays size={18}/></span><span><strong>Mark today's attendance</strong><small>Update today’s scheduled classes</small></span><ChevronRight size={17}/></button><button className="quick-action" onClick={()=>onNavigate('Semesters')}><span className="quick-icon violet"><GraduationCap size={18}/></span><span><strong>Manage semesters</strong><small>Dates, targets and schedules</small></span><ChevronRight size={17}/></button><button className="quick-action" onClick={()=>onNavigate('Reports')}><span className="quick-icon green"><ArrowDownToLine size={18}/></span><span><strong>Export your records</strong><small>Download a PDF attendance report</small></span><ChevronRight size={17}/></button></section><section className="panel note-panel"><div className="note-icon"><CircleHelp size={19}/></div><div><h3>How is attendance calculated?</h3><p>Classes mapped to Present ÷ countable classes × 100. Standard Holiday entries and Other categories mapped to Holiday are left out. Other categories mapped to Present or Absent are included in those totals. Unmarked classes remain pending.</p><button className="text-button" onClick={()=>onNavigate('Settings')}>Review attendance rules <ArrowRight size={14}/></button></div></section></div>
     </>}
   </>;
 }
@@ -483,14 +484,15 @@ function SemestersPage({semester,semesters,semesterId,setSemesterId,loadSemester
   const choose=async(id:number)=>{setSwitchingId(id);try{await onChooseFreeActive(id);}finally{setSwitchingId(null);}};
   return <><PageHeading eyebrow="ACADEMIC ORGANISATION" title="Your semesters" description="Free includes 1 semester. Pro includes up to 3 semesters. Delete an old semester to free a slot." action={canCreate?<button className="btn btn-primary" onClick={onCreate}><Plus size={16}/> New semester</button>:isPro?<button className="btn btn-secondary" disabled title="Delete an existing semester to create another">Pro limit reached · 3/3</button>:<button className="btn btn-primary" onClick={()=>onNavigate('Subscription')}>Unlock up to 3 semesters <ArrowRight size={15}/></button>}/>
     {isPro&&<div className="free-semester-info"><div><strong>Pro plan · Up to 3 semesters</strong><span>{limitReached?'You have reached the 3-semester limit. Delete one semester to free a slot. Deleting a semester permanently removes all of its attendance, subjects, routine and category data.':'You can create and manage up to three semesters. You currently use '+semesterCount+' of 3 slots.'}</span></div><span className="free-semester-count">{semesterCount} of 3</span></div>}
-    {!isPro&&semesters.length>1&&<div className="free-semester-info"><div><strong>Free plan · One working semester</strong><span>You can view every semester. Choose which one you want to keep editable; the others stay safely read-only until you upgrade.</span></div><span className="free-semester-count">{semesters.filter((s:Semester)=>s.canEdit!==false).length} of 1 editable</span></div>}
+    {!isPro&&semesters.length>1&&<div className="free-semester-info"><div><strong>Free plan · One working semester</strong><span>{semesters.some((s:Semester)=>s.freeSelectionUsed)?'Your one-time semester choice has been used for this expired Pro subscription. You can still view every semester, but only your selected semester is editable. Renew Pro to edit or switch between semesters.':semesters.some((s:Semester)=>s.canChooseFreeSemester)?'You can view every semester. After Pro expiry, you may choose ONE semester to keep editable. This choice cannot be changed again until you renew Pro.':'You can view every semester, but only one can be edited on Free. The one-time selection is available after a Pro subscription expires.'}</span></div><span className="free-semester-count">{semesters.filter((s:Semester)=>s.canEdit!==false).length} of 1 editable</span></div>}
     {!semesters.length?<EmptySemester onCreate={onCreate}/>:<div className="semester-grid">{semesters.map((s:Semester)=><div className={`semester-card ${s.id===semesterId?'selected':''} ${s.canEdit===false?'semester-card-readonly':''}`} key={s.id}>
       <div className="semester-card-top"><div className="semester-icon"><GraduationCap size={21}/></div><span className={`status-chip ${s.canEdit===false?'warning':'positive'}`}><span/>{s.accessMode==='PRO'?'Pro access':s.canEdit===false?'Read only':'Free workspace'}</span></div>
       <h3>{s.name}</h3><p className="semester-dates"><CalendarDays size={14}/>{fmtDate(s.start_date)} – {fmtDate(s.end_date)}</p>
       <div className="semester-stats"><div><strong>{s.percentage.toFixed(1)}%</strong><span>Attendance</span></div><div><strong>{s.target_percentage}%</strong><span>Target</span></div><div><strong>{s.present}/{s.total}</strong><span>Present / countable</span></div></div>
       <div className="semester-card-actions">
         <button className={`btn ${s.id===semesterId?'btn-primary':'btn-secondary'} btn-small`} onClick={()=>setSemesterId(s.id)}>{s.id===semesterId?'Selected':'View semester'} <ArrowRight size={14}/></button>
-        {s.canEdit===false&&s.accessMode==='FREE'&&<button className="btn btn-primary btn-small" onClick={()=>choose(s.id)} disabled={switchingId===s.id}>{switchingId===s.id?'Switching…':'Make working semester'}</button>}
+        {s.canEdit===false&&s.accessMode==='FREE'&&s.canChooseFreeSemester&&<button className="btn btn-primary btn-small" onClick={()=>choose(s.id)} disabled={switchingId===s.id}>{switchingId===s.id?'Saving choice…':'Choose once'}</button>}
+        {s.canEdit===false&&s.accessMode==='FREE'&&s.freeSelectionUsed&&<small title="Your one-time choice is locked until Pro is renewed">Choice used · Read only</small>}
         {s.canEdit!==false&&<><button className="btn btn-quiet btn-small semester-edit-name" title="Edit semester name" onClick={()=>setEditing(s)}><Pencil size={14}/> Edit name</button><button className="icon-btn danger-hover" title="Delete semester" onClick={()=>remove(s)}><Trash2 size={16}/></button></>}
       </div>
     </div>)}</div>}
@@ -665,13 +667,68 @@ function SettingsPage({semester,loadSemesters,notify,onCreate,canEdit=true}:any)
       <section className="panel settings-panel timetable-panel"><div className="settings-section-title"><div className="setting-icon violet"><CalendarDays size={19}/></div><div><h3>Weekly timetable</h3><p>How many classes are normally scheduled each day?</p></div></div><div className="timetable-list">{daysOfWeek.map((day,index)=>{const row=days.find(d=>d.weekday===index);return <div className="timetable-row" key={day}><div><strong>{day}</strong><small>{index===0||index===6?'Weekend':'Academic day'}</small></div><select value={row?.class_count??(index===0||index===6?0:5)} disabled={!canEdit} onChange={e=>updateDay(index,Number(e.target.value))}>{[0,1,2,3,4,5].map(n=><option key={n} value={n}>{n} {n===1?'class':'classes'}</option>)}</select></div>;})}</div><div className="form-info"><CircleHelp size={15}/><span>Changing the timetable affects future calendar slots. Existing attendance entries are retained; review days if you change a past schedule.</span></div></section></div><div className="settings-bottom-note"><ShieldCheck size={16}/><span>Changes apply only to <strong>{semester.name}</strong>. Other semesters keep their own targets and timetable.</span></div></>;
 }
 
-function ReportsPage({semester,notify,onCreate,canEdit=true}:any){
-  const [restoring,setRestoring]=useState(false);
-  const backup=async()=>{try{await downloadFile('/backup','attendance-backup.json');notify('Backup downloaded. Keep it somewhere safe.');}catch(e:any){notify(e.message,'error');}};
-  const csv=async()=>{if(!semester)return;try{await downloadFile(`/reports/${semester.id}.csv`,`attendance-${semester.name.toLowerCase().replace(/[^a-z0-9]+/g,'-')}.csv`);notify('CSV report downloaded.');}catch(e:any){notify(e.message,'error');}};
-  const pdf=async()=>{if(!semester)return;try{const report=await api<any>(`/reports/${semester.id}.json`);const doc=new jsPDF();const stats=report.stats;doc.setFont('helvetica','bold');doc.setFontSize(19);doc.text('Attendly - Attendance Report',14,18);doc.setFont('helvetica','normal');doc.setFontSize(11);doc.text(report.semester.name,14,27);doc.setFontSize(9);doc.text(`Semester: ${report.semester.startDate} to ${report.semester.endDate}`,14,34);doc.text(`Attendance target: ${stats.target}%    Current attendance: ${stats.percentage}%`,14,41);autoTable(doc,{startY:48,head:[['Summary','Value']],body:[['Total classes held',String(stats.totalClassesHeld)],['Classes attended',String(stats.present)],['Classes missed',String(stats.absent)],['Other categories counted as Holiday',String(stats.excluded)],['Pending classes',String(stats.pendingClasses)],['Total holiday slots (including Other mapped to Holiday)',String(stats.holiday)],['Countable classes (Present + Absent)',String(stats.total)],[stats.percentage>=stats.target?'Additional absences available':'Recovery classes needed',String(stats.percentage>=stats.target?(stats.safeAbsences??'Not included in Free plan'):(stats.recoveryClasses??'Not included in Free plan'))]],theme:'grid',headStyles:{fillColor:[80,112,220]},styles:{fontSize:10,cellPadding:2.5}});const nextY=(doc as any).lastAutoTable?.finalY??90;autoTable(doc,{startY:nextY+8,head:[['Date','Class','Subject','Category','Calculation']],body:report.entries.map((e:any)=>[e.attendance_date,`Class ${e.class_number}`,e.subject_name??'Unassigned',e.category_name??e.status.replace('_',' '),({PRESENT:'Counts as Present',ABSENT:'Counts as Absent',HOLIDAY:'Counts as Holiday'} as any)[e.attendance_effect]??e.status]),theme:'striped',headStyles:{fillColor:[80,112,220]},styles:{fontSize:10,cellPadding:2},didDrawPage:()=>{doc.setFontSize(8);doc.setTextColor(130);doc.text('Generated by Attendly · Student Academic Workspace',14,doc.internal.pageSize.height-8);}});doc.save(`attendance-${semester.name.toLowerCase().replace(/[^a-z0-9]+/g,'-')}.pdf`);notify('PDF report downloaded.');}catch(e:any){notify(e.message,'error');}};
-  const restore=async(file?:File)=>{if(!file||!canEdit)return;if(!confirm('Restoring this backup will replace all existing semester and attendance records. Continue?'))return;setRestoring(true);try{const json=JSON.parse(await file.text());await api('/backup/restore',{method:'POST',body:JSON.stringify(json)});notify('Backup restored successfully.');window.location.reload();}catch(e:any){notify(e instanceof SyntaxError?'The selected file is not valid JSON.':e.message,'error');}finally{setRestoring(false);}};
-  return <><PageHeading eyebrow="DATA & EXPORTS" title="Reports & backup" description="Download your attendance records and keep a safe copy of your data."/>{!semester?<div className="panel report-empty"><EmptySemester onCreate={onCreate}/></div>:<><div className="report-grid"><section className="panel report-card"><div className="report-icon blue"><ArrowDownToLine size={22}/></div><div className="report-label">SEMESTER REPORT</div><h3>Export attendance CSV</h3><p>Download every saved class entry for {semester.name}. Open it in Excel or Google Sheets for further analysis.</p><div className="report-meta"><span>CSV format</span><span>·</span><span>{semester.name}</span></div><div className="report-buttons"><button className="btn btn-secondary" onClick={csv}>CSV <ArrowDownToLine size={15}/></button><button className="btn btn-primary" onClick={pdf}>PDF <ArrowDownToLine size={15}/></button></div></section><section className="panel report-card"><div className="report-icon green"><CloudDownload size={22}/></div><div className="report-label">FULL DATA BACKUP</div><h3>Download a backup</h3><p>Save all semesters, weekly timetables and attendance records in one JSON file. Use it to move or restore your data.</p><div className="report-meta"><span>JSON format</span><span>·</span><span>All semesters</span></div><button className="btn btn-primary full" onClick={backup}>Download full backup <ArrowDownToLine size={16}/></button></section></div><section className="panel restore-panel"><div className="restore-icon"><CloudDownload size={21}/></div><div className="restore-copy"><h3>Restore from backup</h3><p>Choose a backup JSON file previously exported from Attendly. Restoring replaces the data currently in this application.</p></div><label className="btn btn-quiet restore-btn">{!canEdit?'Restore unavailable in read-only mode':restoring?'Restoring…':'Choose backup file'}<input type="file" accept="application/json,.json" disabled={!canEdit||restoring} onChange={e=>restore(e.target.files?.[0])} hidden/></label></section><div className="backup-warning"><AlertCircle size={16}/><span><strong>Important:</strong> Your attendance records are stored in your private Attendly cloud account. Download a backup regularly to keep an independent copy.</span></div></>}</>;
+function ReportsPage({semester,notify,onCreate}:any){
+  const pdf=async()=>{
+    if(!semester)return;
+    try{
+      const report=await api<any>(`/reports/${semester.id}.json`);
+      const doc=new jsPDF();
+      const stats=report.stats;
+      doc.setFont('helvetica','bold');
+      doc.setFontSize(19);
+      doc.text('Attendly - Attendance Report',14,18);
+      doc.setFont('helvetica','normal');
+      doc.setFontSize(11);
+      doc.text(report.semester.name,14,27);
+      doc.setFontSize(9);
+      doc.text(`Semester: ${report.semester.startDate} to ${report.semester.endDate}`,14,34);
+      doc.text(`Attendance target: ${stats.target}%    Current attendance: ${stats.percentage}%`,14,41);
+      autoTable(doc,{
+        startY:48,
+        head:[['Summary','Value']],
+        body:[
+          ['Total classes held',String(stats.totalClassesHeld)],
+          ['Classes attended',String(stats.present)],
+          ['Classes missed',String(stats.absent)],
+          ['Other categories counted as Holiday',String(stats.excluded)],
+          ['Pending classes',String(stats.pendingClasses)],
+          ['Total holiday slots (including Other mapped to Holiday)',String(stats.holiday)],
+          ['Countable classes (Present + Absent)',String(stats.total)],
+          [stats.percentage>=stats.target?'Additional absences available':'Recovery classes needed',String(stats.percentage>=stats.target?(stats.safeAbsences??'Not included in Free plan'):(stats.recoveryClasses??'Not included in Free plan'))]
+        ],
+        theme:'grid',headStyles:{fillColor:[80,112,220]},styles:{fontSize:10,cellPadding:2.5}
+      });
+      const nextY=(doc as any).lastAutoTable?.finalY??90;
+      autoTable(doc,{
+        startY:nextY+8,
+        head:[['Date','Class','Subject','Category','Calculation']],
+        body:report.entries.map((e:any)=>[
+          e.attendance_date,`Class ${e.class_number}`,e.subject_name??'Unassigned',
+          e.category_name??e.status.replace('_',' '),
+          ({PRESENT:'Counts as Present',ABSENT:'Counts as Absent',HOLIDAY:'Counts as Holiday'} as any)[e.attendance_effect]??e.status
+        ]),
+        theme:'striped',headStyles:{fillColor:[80,112,220]},styles:{fontSize:10,cellPadding:2},
+        didDrawPage:()=>{
+          doc.setFontSize(8);doc.setTextColor(130);
+          doc.text('Generated by Attendly · Student Academic Workspace',14,doc.internal.pageSize.height-8);
+        }
+      });
+      doc.save(`attendance-${semester.name.toLowerCase().replace(/[^a-z0-9]+/g,'-')}.pdf`);
+      notify('PDF report downloaded.');
+    }catch(e:any){notify(e.message,'error');}
+  };
+  return <>
+    <PageHeading eyebrow="REPORTS" title="Attendance report" description="Download a formatted PDF report for your selected semester."/>
+    {!semester?<div className="panel report-empty"><EmptySemester onCreate={onCreate}/></div>:<section className="panel report-card pdf-report-card">
+      <div className="report-icon blue"><FileText size={22}/></div>
+      <div className="report-label">SEMESTER REPORT</div>
+      <h3>Download attendance PDF</h3>
+      <p>Get a printable report for {semester.name}, including your attendance summary, subject assignments and recorded class history.</p>
+      <div className="report-meta"><span>PDF format</span><span>·</span><span>{semester.name}</span></div>
+      <button className="btn btn-primary full" onClick={pdf}><ArrowDownToLine size={16}/> Download PDF report</button>
+      <div className="report-help-note">PDF reports are available with the Pro plan. Your attendance and semester data remain stored securely in your Attendly account.</div>
+    </section>}
+  </>;
 }
 
 export default App;

@@ -121,7 +121,3 @@ export function validateOrigin(request: Request): boolean {
   try { return new URL(origin).origin === new URL(request.url).origin; }
   catch { return false; }
 }
-
-export function csvCell(value: unknown): string {
-  return `"${String(value ?? "").replace(/"/g, '""')}"`;
-}

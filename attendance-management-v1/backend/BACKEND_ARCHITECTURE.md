@@ -4,7 +4,7 @@
 
 This refactor is based only on the uploaded `src.zip`. That archive contained:
 
-- `src/server.ts` — an Express application with HTTP setup, authentication, semester/subject APIs, attendance calculations, reports, backup/restore and LAN startup in one file.
+- `src/server.ts` — an Express application with HTTP setup, authentication, semester/subject APIs, attendance calculations, PDF report data and LAN startup in one file.
 - `src/db.ts` — SQLite connection setup, schema creation and additive compatibility upgrades.
 
 The refactor restructures this **local Node.js + Express + better-sqlite3 backend**. It does not restructure the separately deployed Cloudflare Worker because that Worker source was not present in the uploaded archive.
@@ -43,7 +43,6 @@ src/
 │   ├── semester.validator.ts
 │   ├── subject.validator.ts
 │   ├── attendance.validator.ts
-│   └── backup.validator.ts
 │
 ├── services/                      # Business rules and workflows
 │   ├── auth.service.ts
@@ -62,7 +61,6 @@ src/
 │   ├── calendar.controller.ts
 │   ├── analytics.controller.ts
 │   ├── reports.controller.ts
-│   └── backup.controller.ts
 │
 ├── routes/                        # URL-to-controller mapping
 │   ├── index.ts
@@ -72,7 +70,6 @@ src/
 │   ├── attendance.routes.ts
 │   ├── analytics.routes.ts
 │   ├── reports.routes.ts
-│   └── backup.routes.ts
 │
 ├── middlewares/
 │   ├── auth.middleware.ts
@@ -87,7 +84,6 @@ src/
 │   ├── app-error.ts
 │   ├── crypto.util.ts
 │   ├── date.util.ts
-│   ├── csv.util.ts
 │   └── network.util.ts
 │
 └── types/
@@ -156,10 +152,14 @@ The refactor retains the route paths and the response shapes from the uploaded `
 | GET | `/api/calendar/:semesterId` | Monthly calendar |
 | PUT | `/api/attendance/:semesterId/:date` | Save daily attendance |
 | GET | `/api/analytics/:semesterId` | Semester analytics |
-| GET | `/api/reports/:semesterId.csv` | CSV report |
-| GET | `/api/reports/:semesterId.json` | JSON report |
-| GET | `/api/backup` | Export current user's backup |
-| POST | `/api/backup/restore` | Restore current user's backup |
+| GET | `/api/reports/:semesterId.json` | Authenticated data payload used by the PDF report generator |
+
+## Reports and data export policy
+
+- The only student-facing export is the Pro-gated PDF attendance report.
+- CSV report downloads and user JSON backup/restore endpoints are not mounted.
+- The authenticated `.json` report endpoint supplies data to the browser-side PDF generator; it is not a backup/restore endpoint.
+- Operational database backups, if configured by the service operator, are separate from user-facing exports.
 
 ## Database and data safety
 
