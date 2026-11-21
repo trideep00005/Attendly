@@ -1425,3 +1425,61 @@ input:focus, select:focus, textarea:focus { border-color: #9db0f5; box-shadow: 0
 .suspension-reason-box p{margin:0;color:#633d42;font-size:14px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere;}
 .suspension-modal-help{margin:0 0 17px;font-size:12px;}
 @media(max-width:520px){.suspension-modal-card{padding:22px;border-radius:18px}.suspension-modal-card h2{font-size:21px}}
+
+/* Student feedback form and administration inbox */
+.feedback-page { display: grid; gap: 18px; }
+.feedback-form-panel { padding: 22px; }
+.feedback-form-panel h2 { margin: 5px 0 18px; font-size: 21px; }
+.feedback-form { display: grid; gap: 16px; }
+.feedback-form .field-label { display: grid; gap: 7px; }
+.feedback-form .field-label textarea { width: 100%; min-height: 140px; resize: vertical; }
+.feedback-char-count { justify-self: end; margin-top: -2px; color: #8993a5; font-size: 11px; font-weight: 500; }
+.feedback-rating { display: flex; align-items: center; gap: 5px; }
+.feedback-rating button { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 10px; background: #f2f4f8; color: #a2adbf; cursor: pointer; }
+.feedback-rating button.selected { background: #fff5dc; color: #e5a11b; }
+.feedback-rating button:focus-visible { outline: 2px solid #5278eb; outline-offset: 2px; }
+.feedback-rating span { margin-left: 6px; color: #778297; font-size: 12px; }
+.feedback-contact-choice { display: flex; align-items: flex-start; gap: 9px; color: #66738a; font-size: 13px; line-height: 1.45; }
+.feedback-contact-choice input { margin-top: 2px; accent-color: #5278eb; }
+.feedback-form-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 4px; }
+.feedback-form-footer small { max-width: 490px; color: #8993a5; line-height: 1.45; }
+.feedback-history-section { display: grid; gap: 12px; }
+.feedback-history-section > .panel-header { margin-bottom: 0; }
+.feedback-history-section h2 { margin: 3px 0 0; font-size: 19px; }
+.feedback-empty { display: grid; justify-items: center; gap: 8px; padding: 30px 16px; color: #8a95a8; text-align: center; }
+.feedback-empty strong { color: #3a465b; }
+.feedback-empty span { font-size: 13px; }
+.feedback-history-list { display: grid; gap: 11px; }
+.feedback-history-card { padding: 16px 18px; }
+.feedback-history-head, .feedback-admin-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.feedback-history-head > div:first-child, .feedback-admin-student { display: grid; gap: 4px; }
+.feedback-history-head strong { color: #344158; font-size: 14px; }
+.feedback-history-head small, .feedback-admin-student span { color: #8a95a8; font-size: 11px; }
+.feedback-history-card p { margin: 10px 0 0; color: #526078; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.feedback-status-group, .feedback-admin-badges { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.feedback-status { display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 9px; background: #eef2f7; color: #647188; font-size: 10px; font-weight: 800; white-space: nowrap; }
+.feedback-status.new { background: #fff5df; color: #946314; }
+.feedback-status.reviewed { background: #eaf2ff; color: #315db7; }
+.feedback-history-rating, .feedback-admin-rating { display: inline-flex; align-items: center; gap: 5px; margin-top: 7px; color: #e3a11e; font-size: 13px; letter-spacing: 1px; }
+.feedback-history-rating span { color: #8993a5; font-size: 10px; letter-spacing: 0; }
+.feedback-admin-section { margin-top: 16px; }
+.feedback-admin-list { display: grid; gap: 12px; }
+.feedback-admin-card { padding: 16px; border: 1px solid #e8ecf3; border-radius: 14px; background: #fff; }
+.feedback-admin-student strong { color: #2f3b52; font-size: 14px; }
+.feedback-admin-student strong small { color: #96a0b0; font-size: 11px; font-weight: 600; }
+.feedback-admin-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: 10px; color: #8792a5; font-size: 11px; }
+.feedback-admin-meta > span:first-child { padding: 4px 8px; border-radius: 999px; background: #f1f4f9; color: #53627b; font-weight: 700; }
+.feedback-admin-rating { margin-top: 0; color: #e3a11e; font-size: 11px; letter-spacing: 0; }
+.feedback-admin-message { margin: 12px 0; color: #4c5a72; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.feedback-admin-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding-top: 10px; border-top: 1px solid #f0f2f6; }
+@media (max-width: 640px) {
+  .feedback-form-panel { padding: 17px; }
+  .feedback-form-footer { align-items: stretch; flex-direction: column; }
+  .feedback-form-footer .btn { width: 100%; justify-content: center; }
+  .feedback-history-head, .feedback-admin-card-head { flex-direction: column; }
+  .feedback-status-group, .feedback-admin-badges { align-self: flex-start; }
+  .feedback-admin-actions { justify-content: flex-start; }
+}
+.feedback-rating .feedback-rating-clear { width: auto; padding: 0 7px; background: transparent; color: #778297; font-size: 11px; }
+.feedback-admin-student a { color: #4169c8; text-decoration: none; }
+.feedback-admin-student a:hover { text-decoration: underline; }

@@ -4,12 +4,12 @@ import {
   Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3,
   GraduationCap, LayoutDashboard, LogOut, Menu, Plus, Settings, ShieldCheck,
   Sparkles, Target, Trash2, TrendingUp, UserRound, X, Pencil, CreditCard, Shield, Tags,
-  FileText, UserPlus, type LucideIcon
+  FileText, UserPlus, MessageSquare, Send, Star, type LucideIcon
 } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis, BarChart, Bar } from 'recharts';
 import { api } from './services/api';
 import { jsPDF } from 'jspdf';
-import { AdminPage, SubscriptionPage } from './pages/SaasPages';
+import { AdminPage, AdminFeedbackPage, SubscriptionPage } from './pages/SaasPages';
 import autoTable from 'jspdf-autotable';
 import { LegalPage, PolicyDocumentModal, type PolicyKey } from './pages/LegalPages';
 import { InstallAttendlyPage } from './pages/InstallAttendlyPage';
@@ -40,7 +40,7 @@ const todayISO = () => { const d=new Date(); return `${d.getFullYear()}-${String
 const initialMonth = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; };
 const initials = (s:string) => s.split(/\s+/).map(x=>x[0]).join('').slice(0,2).toUpperCase();
 
-const APP_PAGES = ['Dashboard','Calendar','Analytics','Semesters','Subjects','Attendance Categories','Reports','Settings','Subscription','Legal & Privacy','Administration','More','Install Attendly'];
+const APP_PAGES = ['Dashboard','Calendar','Analytics','Semesters','Subjects','Attendance Categories','Reports','Settings','Subscription','Legal & Privacy','Administration','Student Feedback','More','Install Attendly','Feedback'];
 const pageSlug = (name:string) => name.toLowerCase().replace(/&/g,'and').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
 const pageHash = (name:string) => `#/${pageSlug(name)}`;
 const pageFromHash = () => {
@@ -187,7 +187,9 @@ function App(){
     {name:'Reports',icon:FileText,section:'MANAGE'},{name:'Settings',icon:Settings,section:'MANAGE'},
     {name:'Subscription',icon:CreditCard,section:'ACCOUNT'},{name:'Legal & Privacy',icon:FileText,section:'ACCOUNT'}
   ];
+  if(role==='STUDENT') nav.push({name:'Feedback',icon:MessageSquare,section:'ACCOUNT'});
   if(role!=='STUDENT') nav.push({name:'Administration',icon:Shield,section:'ADMIN'});
+  if(role==='ADMIN'||role==='SUPER_ADMIN') nav.push({name:'Student Feedback',icon:MessageSquare,section:'ADMIN'});
   if(boot) return <>{<div className="boot"><div className="brand-mark"><Activity size={22}/></div><div className="spinner"/><span>Preparing your attendance workspace…</span></div>}{suspensionLayer}</>;
   if(platformStatus?.maintenanceEnabled && user && role==='STUDENT') return <><MaintenanceScreen message={platformStatus.maintenanceReason||'Attendly is temporarily unavailable while we carry out maintenance.'} category={platformStatus.maintenanceType}/>{suspensionLayer}</>;
   if(!user) return <><AuthScreen setup={setup} platformStatus={platformStatus} onSuccess={async u=>{setUser(u);setSetup(false);try{const m=await api<{user:{role?:string}}>('/auth/me');setRole(m.user.role||'STUDENT');}catch{setRole('STUDENT');}await loadSemesters();}} notify={notify}/>{suspensionLayer}</>;
@@ -214,8 +216,10 @@ function App(){
         {page==='Reports'&&<ReportsPage {...contentProps} notify={notify}/>}
         {page==='Subscription'&&<SubscriptionPage notify={notify}/>}{page==='Legal & Privacy'&&<LegalPage notify={notify}/>}
         {page==='Administration'&&role!=='STUDENT'&&<AdminPage notify={notify} role={role}/>}
+        {page==='Student Feedback'&&(role==='ADMIN'||role==='SUPER_ADMIN')&&<AdminFeedbackPage notify={notify}/> }
         {page==='More'&&<MorePage nav={nav} user={user} onNavigate={navigatePage} onLogout={logout} isInstalled={pwaInstalled}/>}
         {page==='Install Attendly'&&<InstallAttendlyPage canInstall={Boolean(deferredInstallPrompt)} isInstalled={pwaInstalled} onInstall={installAttendly}/>}
+        {page==='Feedback'&&role==='STUDENT'&&<FeedbackPage notify={notify}/>}
       </div>
       <footer className="footer"><span>Attendly · Student Academic Workspace</span><span><ShieldCheck size={13}/> Account-protected records</span></footer>
     </main>
@@ -729,6 +733,57 @@ function ReportsPage({semester,notify,onCreate}:any){
       <div className="report-help-note">PDF reports are available with the Pro plan. Your attendance and semester data remain stored securely in your Attendly account.</div>
     </section>}
   </>;
+}
+
+
+function FeedbackPage({notify}:{notify:(message:string,kind?:'error'|'success')=>void}){
+  type FeedbackItem={id:number;category:string;rating:number|null;message:string;contact_allowed:number;status:string;created_at:string;reviewed_at:string|null};
+  const [items,setItems]=useState<FeedbackItem[]>([]);
+  const [category,setCategory]=useState('GENERAL');
+  const [rating,setRating]=useState<number|null>(null);
+  const [message,setMessage]=useState('');
+  const [contactAllowed,setContactAllowed]=useState(false);
+  const [loading,setLoading]=useState(true);
+  const [sending,setSending]=useState(false);
+  const load=async()=>{
+    setLoading(true);
+    try{const result=await api<{feedback:FeedbackItem[]}>('/feedback');setItems(result.feedback||[]);}
+    catch(e:any){notify(e.message,'error');}
+    finally{setLoading(false);}
+  };
+  useEffect(()=>{void load();},[]);
+  const submit=async(e:React.FormEvent<HTMLFormElement>)=>{
+    e.preventDefault();
+    const trimmed=message.trim();
+    if(trimmed.length<10){notify('Please write at least 10 characters of feedback.','error');return;}
+    setSending(true);
+    try{
+      const result=await api<{message:string}>('/feedback',{method:'POST',body:JSON.stringify({category,rating,message:trimmed,contactAllowed})});
+      setMessage('');setCategory('GENERAL');setRating(null);setContactAllowed(false);
+      notify(result.message||'Thank you! Your feedback has been submitted.');
+      await load();
+    }catch(e:any){notify(e.message,'error');}
+    finally{setSending(false);}
+  };
+  const dateLabel=(value:string)=>new Date(value.replace(' ','T')+'Z').toLocaleString('en-IN',{day:'numeric',month:'short',year:'numeric',hour:'numeric',minute:'2-digit'});
+  const categoryLabel=(value:string)=>({GENERAL:'General feedback',BUG_REPORT:'Report a bug',FEATURE_REQUEST:'Feature request',UI_UX:'Design & usability',OTHER:'Other'} as Record<string,string>)[value]||value;
+  return <div className="feedback-page">
+    <PageHeading eyebrow="YOUR VOICE MATTERS" title="Share feedback" description="Tell us what is working well, what needs improvement, or what you would like to see next."/>
+    <section className="panel feedback-form-panel">
+      <div className="panel-kicker">STUDENT FEEDBACK</div><h2>How can we make Attendly better?</h2>
+      <form onSubmit={submit} className="feedback-form">
+        <label className="field-label">Feedback type<select value={category} onChange={e=>setCategory(e.target.value)}><option value="GENERAL">General feedback</option><option value="BUG_REPORT">Report a bug</option><option value="FEATURE_REQUEST">Suggest a feature</option><option value="UI_UX">Design & usability</option><option value="OTHER">Other</option></select></label>
+        <label className="field-label">Your rating <span className="optional-label">Optional</span></label>
+        <div className="feedback-rating" role="group" aria-label="Rate Attendly from 1 to 5">{[1,2,3,4,5].map(value=><button key={value} type="button" className={rating!==null&&value<=rating?'selected':''} onClick={()=>setRating(value)} aria-label={`${value} star${value===1?'':'s'}`}><Star size={22} fill={rating!==null&&value<=rating?'currentColor':'none'}/></button>)}<span>{rating===null?'Optional rating':`${rating}/5`}</span><button type="button" className="feedback-rating-clear" onClick={()=>setRating(null)}>Clear</button></div>
+        <label className="field-label">Your feedback<textarea value={message} onChange={e=>setMessage(e.target.value)} minLength={10} maxLength={2000} rows={6} required placeholder="Share your experience, report a problem, or tell us what you would improve…"/><small className="feedback-char-count">{message.length}/2000 characters</small></label>
+        <label className="feedback-contact-choice"><input type="checkbox" checked={contactAllowed} onChange={e=>setContactAllowed(e.target.checked)}/><span>You may contact me at my registered email address about this feedback.</span></label>
+        <div className="feedback-form-footer"><small>Your username is attached to your feedback. Your registered email is shared with administrators only if you tick the contact permission above.</small><button className="btn btn-primary" type="submit" disabled={sending||message.trim().length<10}>{sending?'Submitting…':'Submit feedback'} <Send size={15}/></button></div>
+      </form>
+    </section>
+    <section className="feedback-history-section"><div className="panel-header"><div><div className="panel-kicker">YOUR SUBMISSIONS</div><h2>Feedback history</h2></div><span className="admin-count">{items.length} submitted</span></div>
+      {loading?<div className="saas-loading"><span className="spinner"/>Loading your feedback…</div>:items.length===0?<div className="panel feedback-empty"><MessageSquare size={22}/><strong>No feedback submitted yet</strong><span>Your messages to the Attendly team will appear here.</span></div>:<div className="feedback-history-list">{items.map(item=><article className="panel feedback-history-card" key={item.id}><div className="feedback-history-head"><div><strong>{categoryLabel(item.category)}</strong><small>{dateLabel(item.created_at)}</small></div><div className="feedback-status-group"><span className={`feedback-status ${item.status.toLowerCase()}`}>{item.status==='REVIEWED'?'Reviewed':'Received'}</span></div></div>{item.rating&&<div className="feedback-history-rating">{'★'.repeat(item.rating)}<span>{item.rating}/5</span></div>}<p>{item.message}</p></article>)}</div>}
+    </section>
+  </div>;
 }
 
 export default App;

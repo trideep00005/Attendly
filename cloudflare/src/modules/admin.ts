@@ -296,6 +296,50 @@ export async function handleAdmin(request: Request, env: Env, auth: AuthContext)
     return json({ ok: true });
   }
 
+  // Student feedback inbox: visible to Admin and Super Admin with users.read permission.
+  if (path === "/api/admin/feedback" && method === "GET") {
+    if (auth.user.role !== "SUPER_ADMIN" && auth.user.role !== "ADMIN") {
+      return json({ error: "Only Admin and Super Admin accounts can review student feedback." }, 403);
+    }
+    if (!(await requirePermission(env, auth, "users.read"))) return json({ error: "You do not have permission to view student feedback." }, 403);
+    const statusFilter = url.searchParams.get("status");
+    const validStatus = statusFilter === "NEW" || statusFilter === "REVIEWED" ? statusFilter : null;
+    const result = await env.DB.prepare(`SELECT f.id,f.user_id,f.category,f.rating,f.message,f.contact_allowed,
+        f.status,f.created_at,f.reviewed_at,u.username,
+        CASE WHEN f.contact_allowed=1 THEN u.email ELSE NULL END AS email
+      FROM student_feedback f
+      JOIN app_user u ON u.id=f.user_id
+      WHERE u.role='STUDENT' AND (? IS NULL OR f.status=?)
+      ORDER BY CASE WHEN f.status='NEW' THEN 0 ELSE 1 END, f.created_at DESC, f.id DESC
+      LIMIT 200`).bind(validStatus, validStatus).all<Record<string, unknown>>();
+    const feedback = rows(result);
+    return json({
+      feedback,
+      total: feedback.length,
+      newCount: feedback.filter((item: any) => item.status === "NEW").length,
+    });
+  }
+
+  const feedbackReviewMatch = path.match(/^\/api\/admin\/feedback\/(\d+)\/review$/);
+  if (feedbackReviewMatch && method === "POST") {
+    if (auth.user.role !== "SUPER_ADMIN" && auth.user.role !== "ADMIN") {
+      return json({ error: "Only Admin and Super Admin accounts can review student feedback." }, 403);
+    }
+    if (!(await requirePermission(env, auth, "users.read"))) return json({ error: "You do not have permission to review student feedback." }, 403);
+    const feedbackId = Number(feedbackReviewMatch[1]);
+    if (!Number.isInteger(feedbackId) || feedbackId < 1) return json({ error: "Invalid feedback entry." }, 400);
+    const update = await env.DB.prepare(`UPDATE student_feedback SET status='REVIEWED', reviewed_by=?,
+        reviewed_at=COALESCE(reviewed_at,CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP
+      WHERE id=? AND status='NEW'`).bind(auth.user.id, feedbackId).run();
+    if (Number(update.meta.changes || 0) !== 1) {
+      const existing = await env.DB.prepare("SELECT id,status FROM student_feedback WHERE id=?").bind(feedbackId).first<{id:number;status:string}>();
+      if (!existing) return json({ error: "Feedback entry not found." }, 404);
+      return json({ ok: true, message: "Feedback was already reviewed." });
+    }
+    await audit(env, auth.user.id, "STUDENT_FEEDBACK_REVIEWED", "STUDENT_FEEDBACK", String(feedbackId), "Student feedback marked as reviewed.");
+    return json({ ok: true, message: "Feedback marked as reviewed." });
+  }
+
   const grantMatch = path.match(/^\/api\/admin\/users\/(\d+)\/grant-subscription$/);
   if (grantMatch && method === "POST") {
     if (!(await requirePermission(env, auth, "subscriptions.grant"))) return json({ error: "You do not have permission to grant subscriptions." }, 403);

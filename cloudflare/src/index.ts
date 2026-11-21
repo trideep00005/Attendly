@@ -6,6 +6,7 @@ import { getEffectivePlan, handleSubscriptions, refreshSubscriptionStates } from
 import { handleAdmin } from "./modules/admin";
 import { handleAdminBootstrap } from "./modules/admin-bootstrap";
 import { handleLegal } from "./modules/legal";
+import { handleFeedback } from "./modules/feedback";
 import { allowRate, requestIp } from "./lib/rate-limit";
 import { getPlatformControls, maintenanceBlockedResponse } from "./lib/platform-controls";
 
@@ -110,6 +111,9 @@ async function routeRequest(request: Request, env: Env): Promise<Response> {
 
     const legalResponse = await handleLegal(request, env, auth.user.id);
     if (legalResponse) return legalResponse;
+
+    const feedbackResponse = await handleFeedback(request, env, auth);
+    if (feedbackResponse) return feedbackResponse;
 
     if (url.pathname === "/api/auth/profile" && request.method === "PATCH") {
       const body = await readJson<{ email?: unknown }>(request);

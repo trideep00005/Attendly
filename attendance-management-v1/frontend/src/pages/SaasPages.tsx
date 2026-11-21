@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { Activity, AlertCircle, ArrowRight, BadgeCheck, CalendarClock, CheckCircle2, CreditCard, ExternalLink, RefreshCw, ShieldCheck, Users, XCircle, Power, UserPlus, Wrench, Save } from 'lucide-react';
+import { Activity, AlertCircle, ArrowRight, BadgeCheck, CalendarClock, CheckCircle2, CreditCard, ExternalLink, RefreshCw, ShieldCheck, Users, XCircle, Power, UserPlus, Wrench, Save, MessageSquare, Star } from 'lucide-react';
 import { api } from '../services/api';
 
 type Notify = (message: string, kind?: 'error'|'success') => void;
@@ -99,6 +99,7 @@ type AdminUser = {id:number;username:string;email:string;role:string;account_sta
 type AdminPlan = {id:number;code:string;name:string;price_inr:number;duration_days:number|null;tier:string;enabled:number;features:Record<string,unknown>};
 type AdminAccount = {id:number;username:string;email:string;role:string;account_status:string;created_at:string;overrides:Record<string,boolean>};
 type AuditLog = {id:number;action:string;target_type:string|null;target_id:string|null;reason:string|null;metadata_json:string;created_at:string;actor:string|null};
+type StudentFeedback = {id:number;user_id:number;username:string;email:string|null;category:string;rating:number|null;message:string;contact_allowed:number;status:'NEW'|'REVIEWED';created_at:string;reviewed_at:string|null};
 type PlatformControls = {
   maintenanceEnabled:boolean;
   maintenanceReason:string;
@@ -222,5 +223,48 @@ ${user.username}`);
     {auditAllowed&&<section className="panel admin-section audit-history-section"><div className="panel-header"><div><div className="panel-kicker">SECURITY & ACCOUNTABILITY</div><h3>Administrative audit history</h3><p className="admin-help">Recent administrative and account actions. Entries are retained as an audit trail.</p></div><span className="admin-count">{auditLogs.length} recent events</span></div>{auditLogs.length===0?<div className="saas-empty-inline">No audit events have been recorded yet.</div>:<div className="audit-log-list">{auditLogs.map(log=><article className="audit-log-row" key={log.id}><div className="audit-log-icon"><ShieldCheck size={16}/></div><div className="audit-log-content"><div className="audit-log-title"><strong>{log.action.replace(/_/g,' ')}</strong><span>{dateLabel(log.created_at)}</span></div><p>{log.reason||'Administrative action recorded.'}</p><small>By {log.actor||'System'}{log.target_type?` · ${log.target_type}${log.target_id?` #${log.target_id}`:''}`:''}</small></div></article>)}</div>}</section>}
     {!isSuper&&role==='SUPPORT_ADMIN'&&<div className="saas-info-banner"><ShieldCheck size={16}/> You have Support Admin access. Payment approval, pricing and administrator management are restricted.</div>}
     {grantTarget&&<div className="grant-modal-backdrop" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget&&!grantBusy)setGrantTarget(null);}}><section className="panel grant-modal" role="dialog" aria-modal="true" aria-labelledby="grant-modal-title"><div className="grant-modal-head"><div><div className="panel-kicker">COMPLIMENTARY ACCESS</div><h3 id="grant-modal-title">Grant Pro to {grantTarget.username}</h3><p className="admin-help">The student will receive Pro features without a payment transaction.</p></div><button type="button" className="icon-btn" disabled={grantBusy} onClick={()=>setGrantTarget(null)} aria-label="Close">×</button></div><form className="admin-create-form" onSubmit={submitGrant}><label>Access duration<select value={grantDays} onChange={e=>setGrantDays(e.target.value)}><option value="7">7 days</option><option value="14">14 days</option><option value="30">30 days</option></select></label><label>Reason for complimentary access<textarea value={grantReason} onChange={e=>setGrantReason(e.target.value)} minLength={4} maxLength={500} rows={3} required placeholder="Beta tester, student promotion, referral…"/></label><div className="grant-modal-note">If the student already has active or queued paid Pro access, complimentary days will be queued after that access ends. Paid days will not be lost.</div><div className="grant-modal-actions"><button type="button" className="btn btn-secondary" disabled={grantBusy} onClick={()=>setGrantTarget(null)}>Cancel</button><button type="submit" className="btn btn-primary" disabled={grantBusy||grantReason.trim().length<4}>{grantBusy?'Granting…':`Grant ${grantDays} days`}</button></div></form></section></div>}
+  </div>;
+}
+
+export function AdminFeedbackPage({notify}:{notify:Notify}) {
+  const [feedback,setFeedback]=useState<StudentFeedback[]>([]);
+  const [busyId,setBusyId]=useState<number|null>(null);
+  const [loading,setLoading]=useState(true);
+  const load=useCallback(async()=>{
+    setLoading(true);
+    try {
+      const result=await api<{feedback:StudentFeedback[]}>('/admin/feedback');
+      setFeedback(result.feedback||[]);
+    } catch(e:any) {
+      notify(e.message,'error');
+    } finally {
+      setLoading(false);
+    }
+  },[notify]);
+  useEffect(()=>{void load();},[]);
+  const markReviewed=async(item:StudentFeedback)=>{
+    setBusyId(item.id);
+    try {
+      const result=await api<{message:string}>(`/admin/feedback/${item.id}/review`,{method:'POST'});
+      notify(result.message||'Feedback marked as reviewed.');
+      setFeedback(current=>current.map(entry=>entry.id===item.id?{...entry,status:'REVIEWED'}:entry));
+    } catch(e:any) {
+      notify(e.message,'error');
+    } finally {
+      setBusyId(null);
+    }
+  };
+  const newCount=feedback.filter(item=>item.status==='NEW').length;
+  return <div className="saas-page">
+    <div className="page-heading"><div><div className="eyebrow">ATTENDLY CONTROL CENTRE</div><h1>Student Feedback</h1><p>Review feedback submitted by students. This inbox is separate from Administration.</p></div><button className="btn btn-secondary" onClick={()=>void load()} disabled={loading}><RefreshCw size={15}/> Refresh</button></div>
+    <section className="panel admin-section feedback-admin-section">
+      <div className="panel-header"><div><div className="panel-kicker">STUDENT VOICE</div><h3>Feedback inbox</h3><p className="admin-help">Read student messages and contact students who have allowed email follow-up.</p></div><span className="admin-count">{newCount} new · {feedback.length} shown</span></div>
+      {loading?<div className="saas-loading"><span className="spinner"/>Loading student feedback…</div>:feedback.length===0?<div className="saas-empty-inline">No student feedback has been submitted yet.</div>:<div className="feedback-admin-list">{feedback.map(item=><article className="feedback-admin-card" key={item.id}>
+        <div className="feedback-admin-card-head"><div className="feedback-admin-student"><strong>{item.username} <small>#{item.user_id}</small></strong><span>{item.email?<a href={`mailto:${item.email}`}>{item.email}</a>:item.contact_allowed?'No email on file':'Student has not allowed email follow-up'} · {dateLabel(item.created_at)}</span></div><div className="feedback-admin-badges"><span className={`feedback-status ${item.status.toLowerCase()}`}>{item.status==='NEW'?'New':'Reviewed'}</span></div></div>
+        <div className="feedback-admin-meta"><span>{item.category.replace(/_/g,' ')}</span>{item.rating&&<span className="feedback-admin-rating"><Star size={13} fill="currentColor"/> {item.rating}/5</span>}<span>{item.contact_allowed?'Student allows email contact':'No follow-up requested'}</span></div>
+        <p className="feedback-admin-message">{item.message}</p>
+        <div className="feedback-admin-actions">{item.status==='NEW'?<button className="btn btn-secondary btn-small" disabled={busyId===item.id} onClick={()=>void markReviewed(item)}><CheckCircle2 size={14}/>{busyId===item.id?'Saving…':'Mark reviewed'}</button>:<span className="feedback-status reviewed">Reviewed</span>}</div>
+      </article>)}</div>}
+    </section>
   </div>;
 }
